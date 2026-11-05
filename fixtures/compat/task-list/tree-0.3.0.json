@@ -1,0 +1,16 @@
+{
+  "text": "Root",
+  "children": [
+    {
+      "text": "[ ] todo"
+    },
+    {
+      "text": "[x] done",
+      "children": [
+        {
+          "text": "[ ] sub"
+        }
+      ]
+    }
+  ]
+}

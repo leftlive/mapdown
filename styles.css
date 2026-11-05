@@ -1,0 +1,976 @@
+/* Mapdown. Colours, fonts and radii come from Obsidian's CSS variables.
+   Geometry that changes at run time (positions, sizes, branch colours) is
+   written by src/view/renderer.ts as inline custom properties or transforms. */
+
+/* ---- map viewport ---------------------------------------------------- */
+
+/* the renderer's layer fills its container; the controller's view element hosts it */
+.mapdown-view {
+	position: relative;
+	/* On phones Obsidian's floating navbar covers the bottom of every view (it subtracts the soft keyboard, which --mapdown-bottom-inset adds back). */
+	--mapdown-view-bottom: max(0px, var(--view-bottom-spacing, 0px));
+}
+
+.mapdown-map {
+	/* read by the renderer: node sizes are measured only once this stylesheet applies */
+	--mapdown-css-ready: 1;
+	position: absolute;
+	inset: 0;
+	overflow: hidden;
+	background-color: var(--mapdown-background, transparent);
+	/* grid dots, painted on the map so node layout and zoom never repaint them */
+	background-image: radial-gradient(circle, color-mix(in srgb, var(--background-modifier-border) 40%, transparent) 1px, transparent 1px);
+	background-size: 23px 23px;
+	background-position: -11.5px -11.5px;
+	transition: box-shadow 0.4s ease;
+	font-family: var(--font-text);
+	color: var(--text-normal);
+	touch-action: none;
+	user-select: none;
+	-webkit-user-select: none;
+	-webkit-touch-callout: none;
+	cursor: default;
+	contain: strict;
+}
+
+.mapdown-map.is-panning {
+	cursor: grabbing;
+}
+
+.mapdown-canvas {
+	position: absolute;
+	left: 0;
+	top: 0;
+	width: 0;
+	height: 0;
+	transform-origin: 0 0;
+}
+
+.mapdown-edges {
+	position: absolute;
+	left: 0;
+	top: 0;
+	overflow: visible;
+	pointer-events: none;
+}
+
+.mapdown-edges path {
+	fill: none;
+	stroke-width: 1.5px;
+	stroke-linecap: round;
+}
+
+.mapdown-edges path.is-root-edge {
+	stroke-width: 2.5px;
+}
+
+/* ---- nodes ------------------------------------------------------------
+   The node element is the box. Its padding comes from --mapdown-pad-x/-y on
+   the level classes and must match NODE_LEVELS in src/view/measure.ts, like
+   the border (NODE_BORDER), the radii and the line height (LINE_HEIGHT);
+   tests/unit/view-measure.test.ts checks it. The renderer writes each
+   level's font size inline. */
+
+.mapdown-node {
+	--mapdown-pad-x: 14px;
+	--mapdown-pad-y: 6px;
+	/* Branch-coloured glow on the side facing the parent (the first-level colour
+	   wash sits on the same side). Right of the root by default. */
+	--mapdown-node-glow: calc(-1 * var(--mapdown-glow-size, 10px)) 0 calc(1.6 * var(--mapdown-glow-size, 10px)) calc(-1 * var(--mapdown-glow-size, 10px)) var(--mapdown-branch-color, transparent);
+	--mapdown-highlight: rgba(255, 255, 255, 0.75);
+	--mapdown-shadow-near: rgba(15, 23, 42, 0.07);
+	--mapdown-shadow-far: rgba(15, 23, 42, 0.16);
+	position: absolute;
+	left: 0;
+	top: 0;
+	box-sizing: border-box;
+	padding: var(--mapdown-pad-y) var(--mapdown-pad-x);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 3px;
+	background: var(--background-primary);
+	color: var(--text-normal);
+	box-shadow: 0 1px 2px var(--mapdown-shadow-near), var(--mapdown-node-glow);
+	line-height: 1.45;
+	white-space: pre-wrap;
+	overflow-wrap: anywhere;
+	outline: none;
+	transition: box-shadow 0.2s ease, border-color 0.2s ease, translate 0.2s ease;
+}
+
+.theme-dark .mapdown-node {
+	--mapdown-highlight: rgba(255, 255, 255, 0.07);
+	--mapdown-shadow-near: rgba(0, 0, 0, 0.35);
+	--mapdown-shadow-far: rgba(0, 0, 0, 0.55);
+}
+
+.mapdown-node.is-left {
+	--mapdown-node-glow: var(--mapdown-glow-size, 10px) 0 calc(1.6 * var(--mapdown-glow-size, 10px)) calc(-1 * var(--mapdown-glow-size, 10px)) var(--mapdown-branch-color, transparent);
+}
+
+/* Levels: each step down is smaller, lighter and sits lower. */
+.mapdown-node.is-root {
+	--mapdown-pad-x: 28px;
+	--mapdown-pad-y: 14px;
+	font-weight: 700;
+	border-radius: 6px;
+	background: linear-gradient(180deg, var(--background-primary), color-mix(in srgb, var(--background-secondary) 80%, var(--background-primary)));
+	border-color: var(--background-modifier-border-hover);
+	box-shadow: inset 0 1px 0 var(--mapdown-highlight), 0 1px 2px var(--mapdown-shadow-near), 0 10px 28px -8px var(--mapdown-shadow-far);
+}
+
+.mapdown-node.is-level-1 {
+	--mapdown-pad-x: 18px;
+	--mapdown-pad-y: 9px;
+	font-weight: 600;
+	border-radius: 4px;
+	background:
+		linear-gradient(180deg, var(--background-primary), color-mix(in srgb, var(--background-secondary) 60%, var(--background-primary)));
+	border-color: color-mix(in srgb, var(--mapdown-branch-color, var(--background-modifier-border)) 40%, var(--background-modifier-border));
+	box-shadow: inset 0 1px 0 var(--mapdown-highlight), 0 1px 2px var(--mapdown-shadow-near), 0 5px 14px -6px var(--mapdown-shadow-far), var(--mapdown-node-glow);
+}
+
+/* The branch colour is deepest along the side facing the parent and fades inwards.
+   Its front curves in towards that edge in the middle, leaving room for the text. */
+.mapdown-node.is-level-1::before {
+	content: "";
+	position: absolute;
+	top: 0;
+	bottom: 0;
+	left: 0;
+	width: 28px;
+	max-width: 100%;
+	border-radius: inherit;
+	pointer-events: none;
+	background: radial-gradient(ellipse 40px 140% at 28px 50%,
+		transparent 36%,
+		color-mix(in srgb, var(--mapdown-branch-color, transparent) 8%, transparent) 46%,
+		color-mix(in srgb, var(--mapdown-branch-color, transparent) 24%, transparent) 57%,
+		color-mix(in srgb, var(--mapdown-branch-color, transparent) 45%, transparent) 69%,
+		color-mix(in srgb, var(--mapdown-branch-color, transparent) 64%, transparent) 83%,
+		color-mix(in srgb, var(--mapdown-branch-color, transparent) 76%, transparent) 100%);
+	-webkit-mask-image: linear-gradient(90deg, #000 30%, transparent);
+	mask-image: linear-gradient(90deg, #000 30%, transparent);
+}
+
+.mapdown-node.is-level-1.is-left::before {
+	left: auto;
+	right: 0;
+	transform: scaleX(-1);
+}
+
+.mapdown-node.is-level-1 > .mapdown-node-content,
+.mapdown-node.is-level-1 > .mapdown-node-editor {
+	position: relative;
+}
+
+.mapdown-node.is-level-2 {
+	--mapdown-pad-x: 14px;
+	--mapdown-pad-y: 6px;
+	border-radius: 3px;
+}
+
+.mapdown-node.is-level-deep {
+	--mapdown-pad-x: 11px;
+	--mapdown-pad-y: 4px;
+	border-radius: 3px;
+	color: color-mix(in srgb, var(--text-normal) 82%, var(--background-primary));
+	background: color-mix(in srgb, var(--background-primary) 60%, var(--background-secondary));
+	box-shadow: var(--mapdown-node-glow);
+}
+
+.mapdown-node-content,
+.mapdown-node-editor {
+	width: max-content;
+	min-width: 1em;
+	/* the renderer sets the node's max width; each level takes off its own padding and border */
+	max-width: calc(var(--mapdown-node-max-width, 800px) - 2 * var(--mapdown-pad-x) - 2px);
+}
+
+.mapdown-node-content.is-empty {
+	color: var(--text-faint);
+}
+
+/* rendered Markdown: no block margins, so measured sizes stay tight */
+.mapdown-node-content > :first-child {
+	margin-top: 0;
+}
+
+.mapdown-node-content > :last-child {
+	margin-bottom: 0;
+}
+
+.mapdown-node-content p,
+.mapdown-node-content ul,
+.mapdown-node-content ol,
+.mapdown-node-content pre,
+.mapdown-node-content table,
+.mapdown-node-content blockquote {
+	margin-top: 0;
+	margin-bottom: 0;
+}
+
+.mapdown-node-content ul {
+	padding-inline-start: 1.2em;
+}
+
+.mapdown-node-content ol {
+	list-style-position: inside;
+	padding-inline-start: 0.35em;
+}
+
+.mapdown-node-content li > p {
+	display: inline;
+	margin: 0;
+}
+
+.mapdown-node-content pre {
+	white-space: pre;
+}
+
+.mapdown-node-content img {
+	max-width: 100%;
+}
+
+/* Images in nodes (spec 5.8): at most 300 px wide unless the embed gives a width (`![[a.png|200]]`). */
+.mapdown-node-content img:not([width]) {
+	max-width: min(100%, 300px);
+}
+
+.mapdown-node-content img:not([height]) {
+	height: auto;
+}
+
+.mapdown-node-content img {
+	-webkit-user-drag: none;
+}
+
+.mapdown-image-picker-path {
+	display: block;
+	color: var(--text-muted);
+}
+
+.mapdown-node-content a {
+	cursor: pointer;
+}
+
+.mapdown-node:not(.is-selected):hover {
+	border-color: var(--background-modifier-border-hover);
+	translate: 0 -1px;
+}
+
+/* search (spec 5.4): a selected node keeps its accent ring */
+.mapdown-node.is-search-match {
+	outline: 2px solid var(--color-yellow);
+	outline-offset: 3px;
+}
+
+.mapdown-node.is-search-current {
+	outline-color: var(--interactive-accent);
+	box-shadow: 0 0 0 4px color-mix(in srgb, var(--interactive-accent) 24%, transparent), 0 4px 12px rgba(0, 0, 0, 0.12);
+}
+
+/* Selection: a crisp accent ring on the border, a thin soft halo, an accent-tinted lift
+   and a faint tint inside. Every selected node looks the same; the glow follows nodeGlowSize. */
+.mapdown-node.is-selected {
+	border-color: var(--interactive-accent);
+	outline: none;
+	translate: 0 -1px;
+	box-shadow:
+		inset 0 0 0 100vmax color-mix(in srgb, var(--interactive-accent) 5%, transparent),
+		inset 0 1px 0 var(--mapdown-highlight),
+		0 0 0 0.5px var(--interactive-accent),
+		0 0 0 3.5px color-mix(in srgb, var(--interactive-accent) 16%, transparent),
+		0 6px 16px -6px color-mix(in srgb, var(--interactive-accent) 45%, transparent),
+		0 0 var(--mapdown-glow-size, 10px) color-mix(in srgb, var(--interactive-accent) 18%, transparent);
+}
+
+.mapdown-node.is-selected.is-search-current {
+	box-shadow: 0 0 0 4px color-mix(in srgb, var(--interactive-accent) 24%, transparent), 0 4px 12px rgba(0, 0, 0, 0.12);
+}
+
+.mapdown-node:focus-visible {
+	outline: 2px solid var(--interactive-accent);
+	outline-offset: 2px;
+}
+
+/* dragged nodes and their subtrees stay in place, faded (spec 4.1, drag feedback) */
+.mapdown-node.is-dragging,
+.mapdown-node.is-drag-source {
+	opacity: 0.5;
+}
+
+/* while the snap preview shows them at the drop place, the old slot has closed:
+   the originals would sit over other nodes, so they are hidden */
+.mapdown-map.has-drop-preview .mapdown-node.is-dragging,
+.mapdown-map.has-drop-preview .mapdown-node.is-drag-source {
+	opacity: 0;
+}
+
+/* the node the placeholder will hang from */
+.mapdown-node.is-drop-parent {
+	outline: 2px solid var(--mapdown-branch-color, var(--interactive-accent));
+	outline-offset: 2px;
+}
+
+/* collapsed: a pill with the hidden child count on the outer side */
+.mapdown-node-badge {
+	position: absolute;
+	top: 50%;
+	left: calc(100% + 6px);
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	box-sizing: border-box;
+	min-width: 20px;
+	height: 18px;
+	margin-top: -9px;
+	padding: 0 5px;
+	border-radius: 9px;
+	border: 1.5px solid var(--mapdown-branch-color, var(--text-muted));
+	background-color: var(--background-primary);
+	color: var(--text-muted);
+	font-size: 11px;
+	font-weight: 600;
+	line-height: 1;
+	white-space: nowrap;
+	cursor: pointer;
+}
+
+.mapdown-node.is-left .mapdown-node-badge {
+	left: auto;
+	right: calc(100% + 6px);
+}
+
+/* collapse dot: on the outer side, shown while the node is hovered or selected.
+   The element is a 16px hit area; the 8px dot is drawn inside it. */
+.mapdown-node-toggle {
+	position: absolute;
+	top: 50%;
+	left: 100%;
+	width: 16px;
+	height: 16px;
+	margin-top: -8px;
+	cursor: pointer;
+	opacity: 0;
+	transition: opacity 0.2s ease;
+}
+
+.mapdown-node.is-left .mapdown-node-toggle {
+	left: auto;
+	right: 100%;
+}
+
+.mapdown-node-toggle::after {
+	content: "";
+	position: absolute;
+	top: 4px;
+	left: 4px;
+	width: 8px;
+	height: 8px;
+	box-sizing: border-box;
+	border-radius: 50%;
+	background: var(--mapdown-branch-color, var(--text-muted));
+	transition: transform 0.2s ease;
+}
+
+.mapdown-node:hover .mapdown-node-toggle,
+.mapdown-node.is-selected .mapdown-node-toggle {
+	opacity: 1;
+}
+
+.mapdown-node-toggle:hover::after {
+	transform: scale(1.3);
+}
+
+.mapdown-node-badge:hover {
+	color: var(--text-normal);
+	border-color: var(--interactive-accent);
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.mapdown-node-toggle,
+	.mapdown-node-toggle::after {
+		transition: none;
+	}
+}
+
+/* ---- inline editor ---------------------------------------------------- */
+
+.mapdown-node.is-editing .mapdown-node-content {
+	display: none;
+}
+
+.mapdown-node-editor {
+	outline: none;
+	white-space: pre-wrap;
+	overflow-wrap: anywhere;
+	user-select: text;
+	-webkit-user-select: text;
+	-webkit-touch-callout: default;
+	cursor: text;
+}
+
+.mapdown-node.is-editing {
+	z-index: 5;
+	background: #333;
+}
+
+.theme-light .mapdown-node.is-editing {
+	background: white;
+}
+
+/* ---- box select, drag and drop --------------------------------------- */
+
+.mapdown-box-select {
+	position: absolute;
+	left: 0;
+	top: 0;
+	pointer-events: none;
+	border: 1px solid var(--interactive-accent);
+	border-radius: 2px;
+	background: color-mix(in srgb, var(--interactive-accent) 12%, transparent);
+}
+
+/* The placeholder: where the dragged node lands, the size of that node, in the
+   branch colour. is-before / is-after / is-child name the drop; is-hidden when
+   the pointer is over no valid place. */
+.mapdown-drop-indicator {
+	position: absolute;
+	left: 0;
+	top: 0;
+	box-sizing: border-box;
+	pointer-events: none;
+	border: 1.5px dashed var(--mapdown-branch-color, var(--interactive-accent));
+	border-radius: 4px;
+	background: color-mix(in srgb, var(--mapdown-branch-color, var(--interactive-accent)) 10%, transparent);
+}
+
+.mapdown-drop-indicator.is-hidden {
+	display: none;
+}
+
+/* the edge from the drop parent to the placeholder */
+.mapdown-edges path.is-drop-edge {
+	stroke-dasharray: 5 4;
+}
+
+/* the card that follows the pointer: a translucent copy of the grabbed node,
+   scaled with the map (the renderer copies the node's computed look) */
+.mapdown-drag-ghost {
+	position: absolute;
+	left: 0;
+	top: 0;
+	z-index: 20;
+	transform-origin: 0 0;
+	pointer-events: none;
+	opacity: 0.85;
+	filter: drop-shadow(0 8px 14px rgba(0, 0, 0, 0.18));
+	will-change: transform;
+	transition: opacity 120ms ease;
+}
+
+.mapdown-drag-ghost.is-invalid {
+	opacity: 0.4;
+}
+
+.mapdown-drag-ghost-card {
+	/* at least the node's size; never narrower than its text */
+	width: max-content;
+	min-width: 100%;
+	max-width: var(--mapdown-node-max-width, 800px);
+	min-height: 100%;
+}
+
+/* the copied content wraps inside the card as it does in the node */
+.mapdown-drag-ghost-card > .mapdown-node-content {
+	width: auto;
+	max-width: none;
+}
+
+/* total count of a multi-select drag, top right; "+" for a copy, top left */
+.mapdown-drag-ghost-count,
+.mapdown-drag-ghost.is-copy::before {
+	position: absolute;
+	top: 0;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	box-sizing: border-box;
+	min-width: 18px;
+	height: 18px;
+	padding: 0 5px;
+	border-radius: 9px;
+	background: var(--interactive-accent);
+	color: var(--text-on-accent);
+	font-size: 11px;
+	font-weight: var(--font-bold);
+	line-height: 1;
+	/* stay the same size on screen whatever the zoom */
+	transform: translateY(-50%) scale(calc(1 / var(--mapdown-ghost-scale, 1)));
+}
+
+.mapdown-drag-ghost-count {
+	right: 0;
+	transform-origin: 100% 50%;
+	translate: 50% 0;
+}
+
+.mapdown-drag-ghost.is-copy::before {
+	content: "+";
+	left: 0;
+	transform-origin: 0 50%;
+	translate: -50% 0;
+}
+
+/* faint line from the ghost card to the placeholder, in screen space */
+.mapdown-drag-connector {
+	position: absolute;
+	left: 0;
+	top: 0;
+	z-index: 19;
+	width: 100%;
+	height: 100%;
+	overflow: visible;
+	pointer-events: none;
+}
+
+.mapdown-drag-connector line {
+	stroke: var(--interactive-accent);
+	stroke-width: 1.5;
+	stroke-dasharray: 2 4;
+	stroke-linecap: round;
+	opacity: 0.45;
+}
+
+.mapdown-drag-connector.is-hidden {
+	display: none;
+}
+
+/* ---- animation (only while the renderer sets is-animating) ------------ */
+
+.mapdown-map.is-animating .mapdown-canvas,
+.mapdown-map.is-animating .mapdown-node {
+	transition:
+		transform 200ms ease,
+		width 200ms ease,
+		height 200ms ease;
+}
+
+.mapdown-map.is-animating .mapdown-edges path {
+	transition: d 200ms ease;
+}
+
+/* the placeholder glides between drop places; the canvas follows drag auto-scroll at once */
+.mapdown-map.is-animating .mapdown-drop-indicator {
+	transition:
+		transform 200ms ease,
+		width 200ms ease,
+		height 200ms ease;
+}
+
+.mapdown-map.is-animating.is-node-dragging .mapdown-canvas {
+	transition: none;
+}
+
+.mapdown-map .mapdown-drop-indicator.is-placing {
+	transition: none;
+}
+
+.mapdown-map.is-animating .mapdown-node.is-entering {
+	transition: none;
+	animation: mapdown-fade-in 200ms ease;
+}
+
+@keyframes mapdown-fade-in {
+	from {
+		opacity: 0;
+	}
+	to {
+		opacity: 1;
+	}
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.mapdown-map.is-animating .mapdown-canvas,
+	.mapdown-map.is-animating .mapdown-node,
+	.mapdown-map.is-animating .mapdown-edges path,
+	.mapdown-map.is-animating .mapdown-drop-indicator,
+	.mapdown-drag-ghost {
+		transition: none;
+	}
+
+	.mapdown-map.is-animating .mapdown-node.is-entering {
+		animation: none;
+	}
+
+	.mapdown-map,
+	.mapdown-node,
+	.mapdown-palette,
+	.markdown-source-view .cm-line.mapdown-sync-line {
+		transition: none;
+	}
+
+	.mapdown-node:not(.is-selected):hover,
+	.mapdown-palette:hover {
+		translate: none;
+	}
+}
+
+/* rendered Markdown: whitespace between blocks is not content */
+.mapdown-node-content.is-rich {
+	white-space: normal;
+}
+
+.mapdown-node-content.is-rich pre,
+.mapdown-node-content.is-rich code {
+	white-space: pre-wrap;
+}
+
+/* ---- controller: toolbar and node menu (src/view/MapView.ts) ---------- */
+
+/* bottom right, vertical: edit group above view group (spec 5.1) */
+.mapdown-toolbar {
+	position: absolute;
+	right: 20px;
+	bottom: calc(20px + var(--mapdown-view-bottom) + var(--mapdown-bottom-inset, 0px));
+	z-index: 2;
+	display: flex;
+	flex-direction: column;
+	gap: 12px;
+	pointer-events: none;
+}
+
+.mapdown-toolbar-group {
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+	background: color-mix(in srgb, var(--background-primary) 70%, transparent);
+	backdrop-filter: blur(8px);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 6px;
+	padding: 8px;
+	box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+	pointer-events: auto;
+}
+
+.mapdown-toolbar .clickable-icon {
+	width: 32px;
+	height: 32px;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	cursor: pointer;
+	border-radius: 4px;
+	color: var(--text-normal);
+	background: var(--background-modifier-form-field);
+	border: 0;
+	padding: 0;
+	box-shadow: none;
+	transition: background 0.1s ease;
+}
+
+.mapdown-toolbar .clickable-icon:hover {
+	background: var(--interactive-hover);
+}
+
+.mapdown-toolbar .clickable-icon svg {
+	width: 16px;
+	height: 16px;
+}
+
+.mapdown-toolbar .clickable-icon.is-disabled {
+	opacity: 0.35;
+	cursor: default;
+}
+
+.mapdown-toolbar .clickable-icon.is-disabled:hover {
+	background: var(--background-modifier-form-field);
+}
+
+/* node menu (spec 5.2): a column of icons; the labels are the tooltips */
+.mapdown-node-menu {
+	position: absolute;
+	z-index: 3;
+	width: 32px;
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	padding: 4px 0;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-s);
+	background: var(--background-primary);
+	box-shadow: 0px 4px 12px rgba(0, 0, 0, 0.5);
+}
+
+.theme-light .mapdown-node-menu {
+	box-shadow: 0px 4px 12px rgba(0, 0, 0, 0.15);
+}
+
+.mapdown-node-menu .clickable-icon {
+	display: flex;
+	justify-content: center;
+	align-items: center;
+	margin: 4px 0;
+	width: 100%;
+	padding: 0;
+	cursor: pointer;
+}
+
+.mapdown-node-menu .clickable-icon > span {
+	display: none;
+}
+
+.mapdown-node-menu .clickable-icon svg {
+	width: 18px;
+	height: 18px;
+	transition: opacity 0.2s;
+}
+
+.mapdown-file-suggest {
+	position: fixed;
+	z-index: var(--layer-popover);
+}
+
+.mapdown-setting-hint {
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+}
+
+.mapdown-invalid {
+	border-color: var(--background-modifier-error);
+}
+
+.mapdown-palettes {
+	display: flex;
+	flex-wrap: wrap;
+	justify-content: flex-end;
+	gap: 12px;
+}
+
+.mapdown-palette {
+	display: flex;
+	flex-direction: column;
+	align-items: stretch;
+	gap: var(--size-2-1);
+	height: auto;
+	padding: 0 0 var(--size-2-1);
+	cursor: pointer;
+	border-radius: 4px;
+	overflow: hidden;
+	border: 2px solid transparent;
+	background: var(--background-primary);
+	box-shadow: none;
+	transition: all 0.2s ease;
+}
+
+.mapdown-palette:hover {
+	translate: 0 -2px;
+	box-shadow: 0 4px 10px rgba(0, 0, 0, 0.1);
+}
+
+.mapdown-palette.is-selected {
+	border-color: var(--interactive-accent);
+	box-shadow: 0 0 0 2px var(--background-modifier-border);
+}
+
+.mapdown-palette-strip {
+	display: flex;
+}
+
+.mapdown-swatch {
+	flex: 0 0 24px;
+	width: 24px;
+	height: 24px;
+	background: var(--mapdown-swatch);
+}
+
+.mapdown-palette-name {
+	font-size: var(--font-ui-smaller);
+	color: var(--text-muted);
+}
+
+/* ---- minimap and mobile node toolbar (src/view/minimap.ts, mobileToolbar.ts) ---- */
+
+.mapdown-view {
+	--mapdown-bottom-inset: 0px;
+}
+
+.mapdown-minimap {
+	--mapdown-minimap-node: var(--text-faint);
+	position: absolute;
+	left: var(--size-4-2);
+	bottom: calc(var(--size-4-2) + var(--mapdown-view-bottom) + var(--mapdown-bottom-inset));
+	z-index: 2;
+	width: 180px;
+	height: 120px;
+	overflow: hidden;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-m);
+	background: var(--background-primary);
+	opacity: 0.9;
+	touch-action: none;
+	cursor: pointer;
+}
+
+.mapdown-minimap-canvas {
+	display: block;
+	width: 100%;
+	height: 100%;
+}
+
+.mapdown-minimap-view {
+	position: absolute;
+	top: 0;
+	left: 0;
+	box-sizing: border-box;
+	border: 1px solid var(--interactive-accent);
+	background: color-mix(in srgb, var(--interactive-accent) 15%, transparent);
+	pointer-events: none;
+}
+
+.mapdown-mobile-toolbar {
+	position: absolute;
+	left: var(--size-4-2);
+	right: var(--size-4-2);
+	bottom: calc(var(--size-4-2) + var(--mapdown-view-bottom) + var(--mapdown-bottom-inset));
+	z-index: 3;
+	display: flex;
+	flex-wrap: nowrap;
+	justify-content: safe center;
+	overflow-x: auto;
+	scrollbar-width: none;
+	gap: var(--size-2-1);
+	padding: var(--size-2-1);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-m);
+	background: var(--background-primary);
+	box-shadow: var(--shadow-s);
+}
+
+.mapdown-mobile-toolbar .clickable-icon {
+	min-width: 40px;
+	min-height: 40px;
+	justify-content: center;
+}
+
+.mapdown-mobile-toolbar .clickable-icon svg {
+	width: 20px;
+	height: 20px;
+}
+
+.mapdown-mobile-toolbar .clickable-icon.is-disabled {
+	opacity: 0.4;
+}
+
+/* the overview and the map toolbar stay above the node toolbar */
+.mapdown-view.has-mobile-toolbar .mapdown-toolbar,
+.mapdown-view.has-mobile-toolbar .mapdown-minimap {
+	bottom: calc(var(--size-4-2) * 2 + var(--mapdown-view-bottom) + var(--mapdown-bottom-inset) + 56px);
+}
+
+/* ---- split-view sync (spec 5.6) ----------------------------------------
+   The Markdown line of the node just selected in the map, for a moment. */
+
+.markdown-source-view .cm-line.mapdown-sync-line {
+	background-color: color-mix(in srgb, var(--text-accent) 18%, transparent);
+	transition: background-color 0.3s ease;
+}
+
+/* ---- search bar (spec 5.4) --------------------------------------------- */
+
+.mapdown-search {
+	position: absolute;
+	top: 12px;
+	right: 20px;
+	z-index: 3;
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	width: min(440px, calc(100% - 40px));
+	min-height: 40px;
+	padding: 6px;
+	color: var(--text-normal);
+	background: var(--background-primary);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 6px;
+	box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+}
+
+.mapdown-search-input {
+	min-width: 0;
+	flex: 1 1 auto;
+	height: 30px;
+}
+
+.mapdown-search-count {
+	flex: 0 0 58px;
+	overflow: hidden;
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+	font-variant-numeric: tabular-nums;
+	text-align: center;
+	white-space: nowrap;
+	text-overflow: ellipsis;
+}
+
+.mapdown-search .clickable-icon {
+	flex: 0 0 30px;
+	width: 30px;
+	height: 30px;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	padding: 0;
+	color: var(--text-muted);
+	background: transparent;
+	border: 0;
+	border-radius: 4px;
+	box-shadow: none;
+}
+
+.mapdown-search .clickable-icon:hover:not(:disabled) {
+	color: var(--text-normal);
+	background: var(--background-modifier-hover);
+}
+
+@media (max-width: 520px) {
+	.mapdown-search {
+		left: 10px;
+		right: 10px;
+		width: auto;
+	}
+
+	.mapdown-search-count {
+		flex-basis: 48px;
+	}
+}
+
+/* ---- focus mode (spec 5.3): the backdrop is tinted and vignetted, the focus
+   node glows. Only the focus subtree is drawn; tint and vignette sit under it. */
+
+.mapdown-view.is-focus-mode .mapdown-map {
+	box-shadow: inset 0 0 0 100vmax color-mix(in srgb, black var(--mapdown-focus-overlay, 40%), transparent);
+	background-image:
+		radial-gradient(circle at center, transparent 30%, rgba(0, 0, 0, 0.5) 100%),
+		radial-gradient(circle, color-mix(in srgb, var(--background-modifier-border) 40%, transparent) 1px, transparent 1px);
+	background-size: 100% 100%, 23px 23px;
+	background-position: 0 0, -11.5px -11.5px;
+}
+
+.theme-light .mapdown-view.is-focus-mode .mapdown-map {
+	background-image:
+		radial-gradient(circle at center, transparent 30%, rgba(0, 0, 0, 0.2) 100%),
+		radial-gradient(circle, rgba(0, 0, 0, 0.3) 1px, transparent 1px);
+}
+
+.mapdown-node.is-focus-root {
+	box-shadow: 0 0 var(--mapdown-focus-glow-size, 150px) color-mix(in srgb, var(--interactive-accent) 45%, transparent);
+}
+
+.mapdown-node.is-focus-root.is-selected {
+	box-shadow:
+		0 0 0 1px var(--interactive-accent),
+		0 0 0 4px color-mix(in srgb, var(--interactive-accent) 20%, transparent),
+		0 0 var(--mapdown-glow-size, 10px) color-mix(in srgb, var(--interactive-accent) 35%, transparent),
+		0 0 var(--mapdown-focus-glow-size, 150px) color-mix(in srgb, var(--interactive-accent) 45%, transparent);
+}

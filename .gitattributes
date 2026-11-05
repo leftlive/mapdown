@@ -1,0 +1,2 @@
+fixtures/compat/** -whitespace
+fixtures/compat/crlf/** -text

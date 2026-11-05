@@ -1,0 +1,8 @@
+{
+  "text": "Root",
+  "children": [
+    {
+      "text": "**bold** *it* `code` [[Link]] [ext](https://x.y) ==mark== #tag"
+    }
+  ]
+}

@@ -1,0 +1,16 @@
+{
+  "text": "Root",
+  "children": [
+    {
+      "text": "first"
+    },
+    {
+      "text": "second",
+      "children": [
+        {
+          "text": "inner"
+        }
+      ]
+    }
+  ]
+}

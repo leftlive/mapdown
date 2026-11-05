@@ -1,0 +1,16 @@
+{
+  "text": "Root",
+  "blockId": "root1",
+  "children": [
+    {
+      "text": "A",
+      "blockId": "ha",
+      "children": [
+        {
+          "text": "item",
+          "blockId": "li1"
+        }
+      ]
+    }
+  ]
+}

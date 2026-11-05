@@ -1,0 +1,18 @@
+{
+  "text": "Root",
+  "children": [
+    {
+      "text": "A",
+      "blockId": "ha",
+      "collapsed": true,
+      "children": [
+        {
+          "text": "a1"
+        }
+      ]
+    },
+    {
+      "text": "B"
+    }
+  ]
+}

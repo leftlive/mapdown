@@ -1,0 +1,16 @@
+{
+  "text": "Root",
+  "children": [
+    {
+      "text": "![[Other note]]"
+    },
+    {
+      "text": "A",
+      "children": [
+        {
+          "text": "![[img.png]]"
+        }
+      ]
+    }
+  ]
+}

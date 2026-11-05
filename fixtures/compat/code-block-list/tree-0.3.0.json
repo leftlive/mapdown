@@ -1,0 +1,9 @@
+{
+  "text": "Root",
+  "children": [
+    {
+      "text": "```js\nlet a = 1;\n```",
+      "blockId": "code1"
+    }
+  ]
+}

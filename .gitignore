@@ -1,0 +1,30 @@
+# Intellij
+*.iml
+.idea
+.vscode
+yarn.lock
+
+# npm
+node_modules
+
+# build
+main.js
+*.js.map
+
+# obsidian
+data.json
+*.bak
+
+# Local project resources (not tracked; only the manifest is)
+_resources/*
+!_resources/README.md
+
+# 代码索引（本机生成）
+.codegraph/
+.gitnexus/
+
+# Video project renders and studio history
+video/out/
+video/zh/out/
+video/.om/
+video/zh/.om/

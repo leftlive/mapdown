@@ -1,0 +1,10 @@
+{
+	"id": "mapdown",
+	"name": "Mapdown",
+	"version": "1.0.0",
+	"minAppVersion": "1.5.7",
+	"description": "Edit any Markdown note as a mind map, with the text and the map kept in sync.",
+	"author": "Ian Jin",
+	"authorUrl": "https://github.com/leftlive",
+	"isDesktopOnly": false
+}

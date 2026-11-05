@@ -1,0 +1,23 @@
+{
+  "text": "Root",
+  "children": [
+    {
+      "text": "L2",
+      "children": [
+        {
+          "text": "L3",
+          "children": [
+            {
+              "text": "L4",
+              "children": [
+                {
+                  "text": "item"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

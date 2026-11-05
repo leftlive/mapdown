@@ -1,0 +1,16 @@
+{
+  "text": "新节点",
+  "children": [
+    {
+      "text": "one",
+      "children": [
+        {
+          "text": "two"
+        }
+      ]
+    },
+    {
+      "text": "three"
+    }
+  ]
+}

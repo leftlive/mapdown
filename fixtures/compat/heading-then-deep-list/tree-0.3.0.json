@@ -1,0 +1,18 @@
+{
+  "text": "Root",
+  "children": [
+    {
+      "text": "a",
+      "children": [
+        {
+          "text": "b",
+          "children": [
+            {
+              "text": "c"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

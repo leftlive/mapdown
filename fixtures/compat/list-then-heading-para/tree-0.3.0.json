@@ -1,0 +1,14 @@
+{
+  "text": "Root",
+  "children": [
+    {
+      "text": "a\ncontinued lazily"
+    },
+    {
+      "text": "b"
+    },
+    {
+      "text": "indented para under b"
+    }
+  ]
+}
