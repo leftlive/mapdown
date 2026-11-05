@@ -148,8 +148,7 @@ Mapdown 上架 Obsidian 社区插件目录后：
 
 ```bash
 npm ci
-npm run check   # 类型检查、lint、单元测试和生产构建
-npm run e2e     # 在运行中的 Obsidian 里跑交互测试
+npm run build
 ```
 
 构建产物是 `main.js`，发布文件是 `manifest.json`、`main.js` 和 `styles.css`。

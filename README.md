@@ -148,8 +148,7 @@ Requires Obsidian 1.5.7 or later.
 
 ```bash
 npm ci
-npm run check   # type check, lint, unit tests and production build
-npm run e2e     # interaction tests against a running Obsidian
+npm run build
 ```
 
 The build produces `main.js`; release files are `manifest.json`, `main.js` and `styles.css`.
