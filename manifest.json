@@ -1,7 +1,7 @@
 {
 	"id": "mapdown",
 	"name": "Mapdown",
-	"version": "1.0.0",
+	"version": "1.0.1",
 	"minAppVersion": "1.5.7",
 	"description": "Edit any Markdown note as a mind map, with the text and the map kept in sync.",
 	"author": "Ian Jin",

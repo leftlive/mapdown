@@ -1,6 +1,6 @@
 {
   "name": "mapdown",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "private": true,
   "type": "module",
   "description": "Edit any Markdown note as a mind map in Obsidian.",
