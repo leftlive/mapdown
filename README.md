@@ -72,6 +72,7 @@ These keys work only while the map has focus, so they never clash with your othe
 | --- | --- |
 | `Tab` | Add a child node |
 | `Enter` | Add a sibling node, or finish editing |
+| `Shift + Enter` / `Mod + Enter` | New line inside the node while editing |
 | `Shift + Tab` | Move the node up one level |
 | `Space` / double-click | Edit the selected node |
 | `Delete` / `Backspace` | Delete the selected nodes |

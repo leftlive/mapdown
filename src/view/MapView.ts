@@ -60,6 +60,7 @@ import { addImageFiles, installImageDrop, openImagePicker } from './nodeImages.t
 import { appendLine, extensionForMime, pastedImageName } from '../nodeImage.ts';
 import { createRenderer } from './renderer.ts';
 import { SearchBar } from './search.ts';
+import type { Viewport } from './viewport.ts';
 import { exportMap, showExportMenu, type ExportFormat } from '../export/exporter.ts';
 
 export const VIEW_TYPE = 'mindmapViewUpgraded';
@@ -94,6 +95,8 @@ export class MapView extends TextFileView implements KeyTarget, HoverParent {
 	private search: SearchBar | null = null;
 	/** Focus node of the last render (to notice focus mode ending because its node went away). */
 	private focusShown: string | null = null;
+	/** Pan and zoom when focus mode was entered, put back on leaving it (spec 5.3). */
+	private focusSavedViewport: Viewport | null = null;
 	private toolbarEl: HTMLElement | null = null;
 	private mobileBar: MobileToolbar | null = null;
 	private mapEl: HTMLElement | null = null;
@@ -264,6 +267,7 @@ export class MapView extends TextFileView implements KeyTarget, HoverParent {
 		this.clearTimers();
 		this.search?.close(false);
 		this.focusShown = null;
+		this.focusSavedViewport = null;
 		this.editing = null;
 		this.previousText.clear();
 		this.loaded = false;
@@ -655,6 +659,7 @@ export class MapView extends TextFileView implements KeyTarget, HoverParent {
 		this.focusShown = v.focus;
 		this.contentEl.toggleClass(DOM.focusMode, v.focus !== null);
 		if (lostFocus) {
+			this.focusSavedViewport = null;
 			this.centerOnPrimary();
 			// Only take keyboard focus back when the map had it (not from a Markdown editor typing in a split).
 			if (hadFocus) this.focusMap();
@@ -951,22 +956,24 @@ export class MapView extends TextFileView implements KeyTarget, HoverParent {
 		if (id !== null) this.enterFocus(id);
 	}
 
-	/** Show only `id` and its subtree, with `id` selected and centred. */
+	/** Show only `id` and its subtree, with `id` selected and the subtree fitted on screen (spec 5.3). */
 	enterFocus(id: string): void {
 		if (!this.loaded || this.unsupported) return;
 		this.commitEdit();
 		this.hideMenu();
 		const v = setFocus(this.session.doc.root, this.session.view, id);
 		if (v.focus !== id) return;
+		// Switching focus from the menu keeps the viewport of the first entry.
+		if (this.session.view.focus === null) this.focusSavedViewport = this.renderer?.viewport ?? null;
 		this.session.setView(pruneSelection(this.session.doc.root, v));
 		this.session.setSelection([id], id);
 		this.search?.refresh(false);
 		this.render(id);
-		this.renderer?.centerOn(id);
+		this.renderer?.fitFocus();
 		this.renderer?.focusNode(id);
 	}
 
-	/** Leave focus mode: the former focus node is selected again and centred. */
+	/** Leave focus mode: the viewport from before is put back and the former focus node selected (spec 5.3). */
 	exitFocus(): void {
 		const former = this.session.view.focus;
 		if (former === null) return;
@@ -974,8 +981,13 @@ export class MapView extends TextFileView implements KeyTarget, HoverParent {
 		this.session.setView(clearFocus(this.session.view));
 		this.focusShown = null;
 		this.search?.refresh(false);
+		// render first: the anchor rule moves the viewport while the full map is laid out
 		this.select([former], former, false);
-		this.renderer?.centerOn(former);
+		const saved = this.focusSavedViewport;
+		this.focusSavedViewport = null;
+		if (saved) this.renderer?.restoreViewport(saved);
+		// moved while focused, it may be off screen now
+		this.renderer?.scrollIntoView(former);
 		this.renderer?.focusNode(former);
 	}
 

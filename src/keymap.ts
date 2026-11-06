@@ -34,6 +34,9 @@ export interface KeyBinding {
 }
 
 const enterOrSibling = (t: KeyTarget): void => (t.isEditing() ? t.commitEdit() : t.run('key:add-sibling'));
+const lineBreakOrNothing = (t: KeyTarget): void => {
+	if (t.isEditing()) t.run('Add line break (<br>)');
+};
 const tabOrChild = (t: KeyTarget): void => (t.isEditing() ? t.commitEdit() : t.run('key:add-child'));
 
 export const KEY_TABLE: readonly KeyBinding[] = [
@@ -41,6 +44,8 @@ export const KEY_TABLE: readonly KeyBinding[] = [
 	{ mods: [], keys: [' ', 'Space'], action: 'Edit node' },
 	{ mods: [], keys: ['F2'], action: 'Edit node' },
 	{ mods: [], keys: ['Enter'], action: enterOrSibling, editing: true },
+	{ mods: ['Shift'], keys: ['Enter'], action: lineBreakOrNothing, editing: true },
+	{ mods: ['Mod'], keys: ['Enter'], action: lineBreakOrNothing, editing: true },
 	{ mods: [], keys: ['Tab', 'Insert'], action: tabOrChild, editing: true },
 	{ mods: [], keys: ['Delete', 'Backspace'], action: 'Delete node & child' },
 	{ mods: [], keys: ['Escape'], action: (t) => t.escape(), editing: true },

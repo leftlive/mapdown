@@ -4,6 +4,7 @@
 
 import type { LayoutResult } from '../core/layout.ts';
 import type { LayoutDirection, MapNode, Point } from '../core/types.ts';
+import type { Viewport } from './viewport.ts';
 
 /** CSS classes and attributes. e2e tests select by these; keep them stable. */
 export const DOM = {
@@ -11,7 +12,7 @@ export const DOM = {
 	view: 'mapdown-view',
 	/** The pannable, zoomable layer (CSS transform). */
 	canvas: 'mapdown-canvas',
-	/** One per rendered node; carries `data-node-id`, role="treeitem", aria-label, tabindex. */
+	/** One per rendered node; carries `data-node-id`, role="treeitem", tabindex. */
 	node: 'mapdown-node',
 	nodeIdAttr: 'data-node-id',
 	selected: 'is-selected',
@@ -146,6 +147,12 @@ export interface MapRenderer {
 	/** The last layout (read-only; the export draws from it). Null before the first render. */
 	layoutSnapshot(): LayoutResult | null;
 	scrollIntoView(id: string): void;
+	/** Current pan and zoom (a copy). */
+	readonly viewport: Viewport;
+	/** Put back a viewport read from `viewport` (leaving focus mode, spec 5.3). */
+	restoreViewport(vp: Viewport): void;
+	/** Show the focused subtree on entering focus mode (spec 5.3); no-op before the first layout. */
+	fitFocus(): void;
 	centerOn(id: string | null): void;
 	/** Put the world point `p` in the middle of the view (minimap jump). */
 	centerOnPoint(p: Point): void;

@@ -41,10 +41,14 @@ import { edgeScroll } from "./autoScroll.ts";
 import { connectorEnds, isPhantom, phantomId, previewInput, realId, type PreviewSpec } from "./dragPreview.ts";
 import { GestureRecognizer, wheelAction, type BoxRect, type GestureSink, type PointerInput, type Target } from "./pointer.ts";
 import {
+	anchorPoint,
 	anchorShift,
 	centerOnRect,
+	clampZoom,
+	focusViewport,
 	fitBounds,
 	revealRect,
+	uncoveredArea,
 	toWorld,
 	visibleRect,
 	zoomAt,
@@ -71,6 +75,10 @@ import { isImageFile } from "../nodeImage.ts";
 const ANIMATION_MS = 200;
 const REVEAL_PAD = 40;
 const FIT_PAD = 40;
+/** Focus mode never zooms out further than this to show the subtree (spec 5.3). */
+const FOCUS_MIN_ZOOM = 0.5;
+/** Floating UI over the map; "show on screen" moves use only the area they leave free (spec 5.1). */
+const COVERING_UI = [DOM.toolbar, DOM.mobileToolbar, DOM.minimap];
 const EDGE_PAD = 20;
 
 const CLS = {
@@ -137,7 +145,6 @@ interface NodeView {
 	h: number;
 	fontPx: number;
 	color: string;
-	label: string;
 	selected: boolean;
 	primary: boolean;
 	collapsed: boolean;
@@ -409,8 +416,27 @@ class Renderer implements MapRenderer {
 	scrollIntoView(id: string): void {
 		const p = this.lay?.nodes.get(id);
 		if (!p) return;
-		const next = revealRect(this.vp, p, this.width, this.height, REVEAL_PAD);
+		const next = revealRect(this.vp, p, this.area(), REVEAL_PAD);
 		if (next !== this.vp) this.setViewport(next);
+		this.refreshWindowNow();
+	}
+
+	get viewport(): Viewport {
+		return { ...this.vp };
+	}
+
+	restoreViewport(vp: Viewport): void {
+		this.setViewport({ x: vp.x, y: vp.y, scale: clampZoom(vp.scale) });
+		this.refreshWindowNow();
+	}
+
+	fitFocus(): void {
+		const lay = this.lay;
+		const focus = this.layoutRoot ? lay?.nodes.get(this.layoutRoot) : undefined;
+		if (!lay || !focus || this.width <= 0 || this.height <= 0) return;
+		this.centered = true;
+		const side = this.focusLook?.side ?? "root";
+		this.setViewport(focusViewport(this.vp, lay.bounds, focus, side, this.area(), FIT_PAD, FOCUS_MIN_ZOOM));
 		this.refreshWindowNow();
 	}
 
@@ -420,14 +446,14 @@ class Renderer implements MapRenderer {
 		const p = lay.nodes.get(id ?? this.layoutRoot ?? "") ?? (this.layoutRoot ? lay.nodes.get(this.layoutRoot) : undefined);
 		if (!p) return;
 		if (this.width > 0) this.centered = true;
-		this.setViewport(centerOnRect(this.vp, p, this.width, this.height));
+		this.setViewport(centerOnRect(this.vp, p, this.area()));
 		this.refreshWindowNow();
 	}
 
 	centerOnPoint(p: Point): void {
 		if (!this.lay) return;
 		this.userMoved = true;
-		this.setViewport(centerOnRect(this.vp, { x: p.x, y: p.y, width: 0, height: 0 }, this.width, this.height));
+		this.setViewport(centerOnRect(this.vp, { x: p.x, y: p.y, width: 0, height: 0 }, this.area()));
 		this.refreshWindowNow();
 	}
 
@@ -439,7 +465,7 @@ class Renderer implements MapRenderer {
 	fit(): void {
 		if (!this.lay) return;
 		this.userMoved = true;
-		this.setViewport(fitBounds(this.lay.bounds, this.width, this.height, FIT_PAD));
+		this.setViewport(fitBounds(this.lay.bounds, this.area(), FIT_PAD));
 		this.refreshWindowNow();
 	}
 
@@ -459,7 +485,6 @@ class Renderer implements MapRenderer {
 		if (editor.contentEditable !== "plaintext-only") editor.contentEditable = "true";
 		editor.setAttr("role", "textbox");
 		editor.setAttr("aria-multiline", "true");
-		editor.setAttr("aria-label", item.node.text);
 		editor.textContent = text;
 		view.el.addClass(DOM.editing);
 
@@ -469,8 +494,14 @@ class Renderer implements MapRenderer {
 		const opts = { signal: state.abort.signal };
 		editor.addEventListener("input", () => this.onEditInput(state), opts);
 		editor.addEventListener("beforeinput", (e) => {
-			// Enter belongs to the controller's key scope; line breaks come in through insertText("\n")
-			if (e.inputType === "insertParagraph" || e.inputType === "insertLineBreak") e.preventDefault();
+			// Enter belongs to the controller's key scope, which inserts line breaks through insertText("\n").
+			// Fallback: with a Chinese IME on macOS, Shift+Enter can arrive without key === "Enter", so the
+			// scope never matches and the browser fires insertLineBreak instead; insert the break ourselves.
+			// No double insertion: when the scope handles the key, Obsidian calls preventDefault on keydown,
+			// so no beforeinput fires. Plain Enter (insertParagraph) stays cancelled with nothing inserted.
+			if (e.inputType !== "insertParagraph" && e.inputType !== "insertLineBreak") return;
+			e.preventDefault();
+			if (e.inputType === "insertLineBreak" && !state.composing && !e.isComposing) handle.insertText("\n");
 		}, opts);
 		editor.addEventListener("paste", (e) => {
 			e.preventDefault();
@@ -679,7 +710,7 @@ class Renderer implements MapRenderer {
 			lay = this.layouter.layout(input, look ? look.side : model.direction, look ? [look.color] : model.palette);
 			vp = vp0;
 			const after = opts.anchorId ? lay.nodes.get(opts.anchorId) : undefined;
-			if (before && after) vp = anchorShift(vp0, before, after);
+			if (before && after) vp = anchorShift(vp0, this.anchorOf(before), this.anchorOf(after));
 			if (pass >= 2) break;
 
 			const window = visibleRect(vp, this.width, this.height, WINDOW_MARGIN);
@@ -786,7 +817,6 @@ class Renderer implements MapRenderer {
 			h: NaN,
 			fontPx: 0,
 			color: "",
-			label: "",
 			selected: false,
 			primary: false,
 			collapsed: false,
@@ -922,11 +952,6 @@ class Renderer implements MapRenderer {
 				view.el.toggleClass(CLS.left, side === "left");
 				view.side = side;
 			}
-			const label = item.node.text === "" ? model.placeholder : item.node.text;
-			if (label !== view.label) {
-				view.el.setAttr("aria-label", label);
-				view.label = label;
-			}
 			const level = item.depth + 1;
 			if (level !== view.level) {
 				view.el.setAttr("aria-level", String(level));
@@ -1058,6 +1083,24 @@ class Renderer implements MapRenderer {
 
 	// ---- viewport -----------------------------------------------------------
 
+	/**
+	 * The screen area not covered by the floating UI (spec 5.1, available area): the map toolbar, the
+	 * touch node toolbar and the minimap, where shown. Measured on each call, so only for one-off
+	 * viewport moves, never from the render loop.
+	 */
+	private area(): Rect {
+		const covers: Rect[] = [];
+		const map = this.rootEl.getBoundingClientRect();
+		for (const cls of COVERING_UI) {
+			for (const el of Array.from(this.container.getElementsByClassName(cls))) {
+				const r = el.getBoundingClientRect();
+				if (r.width <= 0 || r.height <= 0) continue; // hidden
+				covers.push({ x: r.left - map.left, y: r.top - map.top, width: r.width, height: r.height });
+			}
+		}
+		return uncoveredArea(this.width, this.height, covers);
+	}
+
 	private setViewport(vp: Viewport): void {
 		if (vp.x === this.vp.x && vp.y === this.vp.y && vp.scale === this.vp.scale) return;
 		this.vp = vp;
@@ -1107,6 +1150,11 @@ class Renderer implements MapRenderer {
 		const view = visibleRect(this.vp, this.width, this.height, this.cappedScale === null ? REFRESH_MARGIN : 0);
 		const stale = this.cappedScale !== null && this.cappedScale !== this.vp.scale;
 		if (stale || needsWindowRefresh(this.covered, view)) this.render({ anchorId: this.settleAnchor(), animate: false });
+	}
+
+	/** Anchor point of a placed node; the focus-mode root counts as a node on its branch's side. */
+	private anchorOf(p: NodePlacement): Point {
+		return anchorPoint(p, p.id === this.layoutRoot && this.focusLook ? this.focusLook.side : p.side);
 	}
 
 	/**
@@ -1196,7 +1244,19 @@ class Renderer implements MapRenderer {
 		if (this.edit !== state || this.destroyed) return;
 		this.measureEditor(state);
 		this.render({ anchorId: state.id, animate: false });
+		this.revealEditor(state);
 		this.events.editInput(state.id, state.el.textContent ?? "");
+	}
+
+	/** Pan just enough to bring the edited node back on screen (spec 3.1). */
+	private revealEditor(state: EditState): void {
+		if (this.edit !== state || this.destroyed) return;
+		const p = this.lay?.nodes.get(state.id);
+		if (!p) return;
+		const next = revealRect(this.vp, p, this.area(), REVEAL_PAD);
+		if (next === this.vp) return;
+		this.setViewport(next);
+		this.refreshWindowNow();
 	}
 
 	private measureEditor(state: EditState): void {

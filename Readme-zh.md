@@ -72,6 +72,7 @@ mindmap-plugin: basic
 | --- | --- |
 | `Tab` | 新增子节点 |
 | `Enter` | 新增同级节点，或结束编辑 |
+| `Shift + Enter` / `Mod + Enter` | 编辑时在节点里换行 |
 | `Shift + Tab` | 节点升一级 |
 | `空格` / 双击 | 编辑选中的节点 |
 | `Delete` / `Backspace` | 删除选中的节点 |
