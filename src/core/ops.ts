@@ -35,6 +35,7 @@ import {
 	type Form,
 	type NewNode,
 } from './serialize.ts';
+import { makeTaskKind, taskOf, toggleTaskText } from './tasks.ts';
 import type { EditResult, MapNode, ParsedDoc, Range, TextEdit } from './types.ts';
 
 export interface OpOptions {
@@ -1207,6 +1208,115 @@ export function setText(doc: ParsedDoc, id: string, value: string): OpResult | n
 	if (value === node.text) return { edits: [], inverse: [], anchors: [node.source.range.from] };
 	const edits = textEdits(idx, node, value);
 	return edits ? result(doc.text, edits, [node.source.range.from]) : null;
+}
+
+/**
+ * "Toggle task" on one list item (behaviour spec 5.9): `[ ]` becomes `[x]`,
+ * any done mark becomes `[ ]` (only the character in the brackets changes),
+ * and an item that is not a task gets `[ ] ` in front of its text. Null for
+ * nodes that are not list items.
+ */
+export function toggleTask(doc: ParsedDoc, id: string): OpResult | null {
+	const node = indexDoc(doc).info.get(id)?.node;
+	if (!node?.source || node.kind !== 'list') return null;
+	const { text } = doc;
+	const s = node.source;
+	const start = itemTextStart(text, node);
+	const mark = taskOf(node.text, 'list');
+	if (mark) {
+		const at = start + 1;
+		if (text[start] === '[' && text.startsWith(mark.char, at)) {
+			return result(text, [{ from: at, to: at + mark.char.length, insert: mark.done ? ' ' : 'x' }], [s.range.from]);
+		}
+		return setText(doc, id, toggleTaskText(node.text));
+	}
+	const edits = addTaskMarker(doc, node);
+	return edits ? result(text, edits, [s.range.from]) : null;
+}
+
+/** Where a list item's text starts on its first line (multi-line items have no textRange). */
+function itemTextStart(text: string, node: MapNode): number {
+	const s = src(node);
+	if (s.textRange) return s.textRange.from;
+	const line = firstLine(text, node);
+	const m = LIST_LINE.exec(line);
+	return s.range.from + (m ? line.length - (m[2] ?? '').length : line.length);
+}
+
+/** Edits putting `[ ] ` in front of a list item's text (the item is no task yet). */
+function addTaskMarker(doc: ParsedDoc, node: MapNode): TextEdit[] | null {
+	const { text } = doc;
+	const start = itemTextStart(text, node);
+	if (node.text !== '' && text.startsWith(node.text.slice(0, 1), start) && !node.text.startsWith('>')) {
+		return [{ from: start, to: start, insert: '[ ] ' }];
+	}
+	// empty items and escaped text: write the whole text
+	return setText(doc, node.id, toggleTaskText(node.text))?.edits ?? null;
+}
+
+/**
+ * Edits turning a paragraph into a list-item task in the same place (spec
+ * 5.11): `- [ ] ` in front (only `- ` when the text starts with a task marker
+ * already), later lines indented under the item's content. Null when the
+ * paragraph would not stay a leaf there: a later line reads as a list item, or
+ * a later sibling indented deeper would become its child.
+ */
+function paragraphTaskEdits(idx: DocIndex, node: MapNode): TextEdit[] | null {
+	const pd = describeParent(idx, node.id);
+	if (!pd?.convert) return null;
+	const text = idx.doc.text;
+	const s = src(node);
+	const at = pd.convert.from;
+	const marked = taskOf(node.text, 'list') !== null && text[at] === '[';
+	const edits: TextEdit[] = [{ from: at, to: at, insert: marked ? '- ' : '- [ ] ' }];
+	const content = pd.col + 2;
+	let p = s.range.from;
+	splitRegion(text, s.range.from, s.range.to).forEach((l, i) => {
+		const lead = leadLength(l.text);
+		if (i > 0 && columns(l.text.slice(0, lead)) < content) edits.push({ from: p, to: p + lead, insert: ' '.repeat(content) });
+		p += l.text.length + l.brk.length;
+	});
+	return edits;
+}
+
+export interface MakeTasksResult {
+	/** One op for all changed nodes; null when nothing changes. */
+	result: OpResult | null;
+	/** Ids of the changed nodes in document order (the anchors of `result`, same order). */
+	changed: string[];
+	/** Nodes that cannot be tasks: headings, quotes, code, tables, the root, paragraphs that cannot stay where they are. */
+	skipped: number;
+}
+
+/**
+ * "Make tasks" on several nodes (spec 5.11), as one op: list items that are no
+ * task get `[ ] `, tasks stay as they are, paragraphs become list-item tasks,
+ * everything else is skipped and counted.
+ */
+export function makeTasks(doc: ParsedDoc, ids: readonly string[]): MakeTasksResult {
+	const idx = indexDoc(doc);
+	const changes: { node: MapNode; edits: TextEdit[] }[] = [];
+	let skipped = 0;
+	for (const id of new Set(ids)) {
+		const node = idx.info.get(id)?.node;
+		if (!node) continue;
+		const kind = makeTaskKind(node);
+		if (kind === 'task') continue;
+		const edits = kind === 'skip' ? null : node.kind === 'list' ? addTaskMarker(doc, node) : paragraphTaskEdits(idx, node);
+		if (edits) changes.push({ node, edits });
+		else skipped++;
+	}
+	if (changes.length === 0) return { result: null, changed: [], skipped };
+	changes.sort((a, b) => src(a.node).range.from - src(b.node).range.from);
+	const edits = changes.flatMap((c) => c.edits);
+	// every edit lies at or after its node's line start, so a line start moves by the edits before it
+	const anchors = changes.map((c) => {
+		const at = src(c.node).range.from;
+		let delta = 0;
+		for (const e of edits) if (e.from < at) delta += e.insert.length - (e.to - e.from);
+		return at + delta;
+	});
+	return { result: result(doc.text, edits, anchors), changed: changes.map((c) => c.node.id), skipped };
 }
 
 function virtualRootText(idx: DocIndex, value: string): OpResult | null {

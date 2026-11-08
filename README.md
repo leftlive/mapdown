@@ -15,7 +15,9 @@ Mapdown is an Obsidian plugin that opens your Markdown notes as editable mind ma
 ## Why Mapdown
 
 - **Your notes stay Markdown.** The map is just another view of the note. Links, search, sync and version history keep working.
-- **Text and map stay in sync.** Open the note side by side: select a node and the Markdown jumps to its line; move the cursor in the text and the map follows.
+- **Text and map stay in sync.** One click on the split button opens the note side by side: select a node and the Markdown jumps to its line; move the cursor in the text and the map follows.
+- **Maps inside your notes.** Write `![[My map]]`, or right-click and choose **Insert mind map…**, and the map shows up in the note as a live, zoomable map. Embed a whole map or just one branch.
+- **Tasks in the map.** `- [ ]` nodes get a checkbox, and parent nodes show progress like `2/5`.
 - **Focus Mode.** Press `F` and the map shows only the selected branch, with the rest faded away. Work through one idea at a time, then press `F` again to get the whole map back, right where you left it.
 - **Phones and tablets too.** Touch gestures and a node toolbar let you build and edit maps without a keyboard.
 - **Built for Obsidian.** Nodes render Markdown, images and `[[wikilinks]]`, with hover previews.
@@ -25,11 +27,14 @@ Mapdown is an Obsidian plugin that opens your Markdown notes as editable mind ma
 
 ![Click a node and the Markdown jumps to its line; click a line and the map selects its node](docs/screenshots/mapdown-sync.gif)
 
+![A mind map embedded in an ordinary note, with task checkboxes and progress counts](docs/screenshots/mapdown-embed.png)
+
 ## Quick start
 
 1. Install and enable Mapdown.
 2. Click the Mapdown icon in the ribbon or run **Create new mindmap**. To use a note you already have, click the Mapdown button next to the reading/editing toggle in its header.
-3. To see text and map together, split the tab (right-click the tab → **Split right**) and run **Toggle markdown/mindmap** in one of the two panes.
+3. To see text and map together, click the split button in the map's header. The Markdown opens on the right with selection sync on; click again to close it.
+4. To show a map inside another note, right-click in that note's editor and choose **Insert mind map…**.
 
 A minimal mind map note:
 
@@ -55,7 +60,10 @@ When you open an ordinary note as a mind map, Mapdown asks first. You can conver
 
 - **Keyboard-first editing:** `Tab`, `Enter`, arrow keys and `Space` build and edit the tree (see [Keys in the map](#keys-in-the-map)).
 - **Drag and drop:** the map shows where a node will land before you let go. Hold `Ctrl` to copy.
-- **Multiple selection:** `Cmd/Ctrl`-click, `Shift`-click or drag a box, then act on all of them in one undo step.
+- **Multiple selection:** `Cmd/Ctrl`-click, `Shift`-click or drag a box. A bar above the selection makes tasks, bolds, highlights, folds, copies, cuts or deletes them in one undo step.
+- **Embedded maps:** in reading view and Live Preview, `![[map]]` shows a map; `![[map#Heading]]` shows one branch and `![[map|300]]` sets the height. Click it to pan and zoom, double-click a node to open the map there. Inside a node, an embedded map shows as a card that opens it.
+- **Tasks:** click a checkbox, or press `Mod + Enter`, to tick a task. Parents count the tasks below them.
+- **Quotes and callouts** in nodes look as they do in reading view.
 - **Paste an outline:** a multi-line list pasted into the map becomes a subtree.
 - **Images:** paste, drag in, or run **Insert image…**.
 - **Large maps:** collapse to any level with `Alt + 1…6`, search inside collapsed branches, and jump around with the overview on maps over 300 nodes.
@@ -76,6 +84,7 @@ These keys work only while the map has focus, so they never clash with your othe
 | `Shift + Tab` | Move the node up one level |
 | `Space` / double-click | Edit the selected node |
 | `Delete` / `Backspace` | Delete the selected nodes |
+| `Mod + Enter` | Make the selected node a task, or tick / untick it |
 | Arrow keys | Move between nodes |
 | `Alt + Shift` + arrow keys | Move the node up, down, left or right |
 | `Home` | Select and center the root node |
@@ -104,12 +113,14 @@ Every action is also a command, so you can find it in the command palette and as
 | Focus overlay and glow | How strongly Focus Mode dims the rest of the map |
 | Link preview and open mode | Hover previews, and where clicked links open |
 | Sync selection with Markdown | Turn the text–map selection sync on or off |
+| Show task progress | Show `done/total` on nodes with tasks below them |
+| Embedded maps and height | Show `![[map]]` as a map, and how tall it is |
 
 Changes apply to open maps right away, and every setting can be found with Obsidian's settings search.
 
 ## Limitations
 
-- Mapdown structures notes; it is not a diagram tool. There are no themes, callouts or free-form drawing.
+- Mapdown structures notes; it is not a diagram tool. There are no themes, frames or free-form drawing.
 - XMind import and export are one-off conversions. Images, styles, summaries and relationships are not carried over.
 - The interface is in English and Simplified Chinese.
 

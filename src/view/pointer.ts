@@ -96,6 +96,8 @@ export class GestureRecognizer {
 	private readonly clock: Clock;
 	private readonly now: () => number;
 	private readonly isMac: boolean;
+	/** Read-only map (embed, spec 5.10): drags pan, one finger is left to the page, no long-press menu. */
+	readOnly = false;
 
 	constructor(sink: GestureSink, clock: Clock, now: () => number, isMac: boolean) {
 		this.sink = sink;
@@ -130,7 +132,7 @@ export class GestureRecognizer {
 			if (this.mode === "idle") this.pointers.delete(p.id);
 		} else if (button === 0) {
 			this.mode = "pending";
-			if (p.type === "touch") {
+			if (p.type === "touch" && !this.readOnly) {
 				this.clearTimer();
 				this.timer = this.clock.setTimeout(() => {
 					this.timer = null;
@@ -170,6 +172,11 @@ export class GestureRecognizer {
 			case "pending":
 				if (dist < slop) return;
 				this.clearTimer();
+				// read-only: the page scrolls under one finger; a second finger still pinches
+				if (s.type === "touch" && this.readOnly) {
+					this.mode = "settle";
+					return;
+				}
 				this.sink.capture(p.id);
 				if (s.type === "touch") {
 					this.mode = "pan";
@@ -268,7 +275,10 @@ export class GestureRecognizer {
 	}
 
 	private beginDragOrBox(s: PointerInput, p: PointerInput): void {
-		if (s.target.kind === "node") {
+		if (this.readOnly) {
+			this.mode = "pan";
+			this.sink.panBy(p.x - s.x, p.y - s.y);
+		} else if (s.target.kind === "node") {
 			this.mode = "drag";
 			this.sink.dragStart(s.target.id, { x: s.x, y: s.y });
 			this.sink.dragMove({ x: p.x, y: p.y }, p.mods);

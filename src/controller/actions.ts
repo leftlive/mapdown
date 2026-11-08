@@ -7,8 +7,10 @@ import { writeOutline } from '../core/outline.ts';
 import {
 	deleteNodes,
 	findNodeAt,
+	makeTasks,
 	moveNodes,
 	setText,
+	toggleTask,
 	type NodeInput,
 } from '../core/ops.ts';
 import { visibleNodes, type ViewState } from '../core/state.ts';
@@ -230,6 +232,41 @@ export function toggleWrap(text: string, marker: string): string {
 /** "Remove line breaks": every line break becomes a space. */
 export function removeLineBreaks(text: string): string {
 	return text.replace(/\s*\n\s*/g, ' ');
+}
+
+// ---------------------------------------------------------------- tasks
+
+/**
+ * "Toggle task" on a selection (spec 5.9): one step per selected list item,
+ * run as one chain so it is one undo step. Other nodes are skipped; an empty
+ * list means there is nothing to do.
+ */
+export function toggleTaskSteps(nodes: readonly MapNode[]): StepFn[] {
+	return nodes
+		.filter((n) => n.kind === 'list' && n.source !== null)
+		.map((n): StepFn => (d, id) => {
+			const result = toggleTask(d, id(n.id));
+			return result ? { result, keep: [id(n.id)] } : null;
+		});
+}
+
+/**
+ * "Make tasks" on a selection (spec 5.11) as one step: only nodes that are no
+ * task yet change, no task's state does. `skipped()` tells, once the step ran,
+ * how many nodes could not become tasks. Running it changes nothing (and the
+ * session run fails) when no node can change.
+ */
+export function makeTasksSteps(nodes: readonly MapNode[]): { steps: StepFn[]; skipped: () => number } {
+	let skipped = 0;
+	const ids = nodes.map((n) => n.id);
+	const steps: StepFn[] = [
+		(d, id) => {
+			const r = makeTasks(d, ids.map(id));
+			skipped = r.skipped;
+			return r.result ? { result: r.result, keep: r.changed } : null;
+		},
+	];
+	return { steps, skipped: () => skipped };
 }
 
 // ---------------------------------------------------------------- clipboard

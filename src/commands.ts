@@ -15,6 +15,7 @@ import {
 	siblingPosition,
 } from './core/ops.ts';
 import { selectAllVisible, topmostSelected } from './core/state.ts';
+import { makeTaskKind } from './core/tasks.ts';
 import type { MapNode } from './core/types.ts';
 import {
 	joinSteps,
@@ -23,9 +24,11 @@ import {
 	removeLineBreaks,
 	showToLevel,
 	sidesOf,
+	makeTasksSteps,
+	toggleTaskSteps,
 	toggleWrap,
 } from './controller/actions.ts';
-import { collapseToggleTarget } from './controller/selectionOps.ts';
+import { collapseAllTarget, collapseToggleTarget } from './controller/selectionOps.ts';
 import { indexNodes, keepSelection, type StepFn } from './controller/session.ts';
 import type { StringKey } from './i18n.ts';
 import type { MapView } from './view/MapView.ts';
@@ -165,6 +168,44 @@ function textSteps(nodes: readonly MapNode[], change: (text: string) => string):
 	});
 }
 
+/**
+ * "Toggle task" (spec 5.9). One selected node: a list item toggles (a plain
+ * item gets `[ ] `), a paragraph becomes a list-item task, anything else only
+ * gets a notice. Two or more: the same as "Make tasks" (5.11), which never
+ * changes whether a task is done. One undo step either way. From the palette
+ * while editing, the edit is committed first; Mod+Enter while editing is a
+ * line break instead (keymap.ts).
+ */
+function toggleTasks(v: MapView): void {
+	if (v.isEditing()) v.commitEdit();
+	const nodes = v.selectedInOrder();
+	if (nodes.length >= 2) {
+		makeTasksIn(v, nodes);
+		return;
+	}
+	const node = nodes[0];
+	if (!node) return;
+	const kind = makeTaskKind(node);
+	if (node.kind === 'list' && kind !== 'skip') {
+		v.runSteps(toggleTaskSteps([node]), { reveal: false, select: keepSelection(v.session) });
+	} else if (kind === 'add') {
+		const plan = makeTasksSteps([node]);
+		v.runSteps(plan.steps, { reveal: false, select: keepSelection(v.session) });
+		if (plan.skipped() > 0) v.notify('task-not-allowed');
+	} else {
+		v.notify(node.kind === 'heading' ? 'task-heading' : 'task-not-allowed');
+	}
+}
+
+/** "Make tasks" (spec 5.11): only nodes that are no task yet change; skipped nodes are counted in a notice. */
+function makeTasksIn(v: MapView, nodes: readonly MapNode[]): void {
+	if (nodes.length === 0) return;
+	const plan = makeTasksSteps(nodes);
+	v.runSteps(plan.steps, { reveal: false, select: keepSelection(v.session) });
+	const n = plan.skipped();
+	if (n > 0) v.notify(n === 1 ? 'tasks-skipped-one' : 'tasks-skipped', n);
+}
+
 /** Every selected node with children follows the primary (one undo step). */
 function toggleCollapse(v: MapView): void {
 	const sel = v.session.view.selection;
@@ -267,6 +308,7 @@ export const COMMANDS: MapCommand[] = [
 		},
 	},
 	{ id: 'Toggle expand/collapse node', name: 'Toggle expand/collapse node', need: 'selection', palette: true, run: toggleCollapse },
+	{ id: 'toggle-task', name: 'toggle-task', need: 'selection', palette: true, run: toggleTasks },
 	{ id: 'Move the current node above', name: 'Move the current node above', need: 'selection', palette: true, run: (v) => moveBy(v, 'up') },
 	{ id: 'Move the current node below', name: 'Move the current node below', need: 'selection', palette: true, run: (v) => moveBy(v, 'down') },
 	{ id: 'Move the current node left', name: 'Move the current node left', need: 'selection', palette: true, run: (v) => moveSide(v, 'left') },
@@ -344,6 +386,18 @@ export const COMMANDS: MapCommand[] = [
 		},
 	},
 	{ id: 'key:focus', name: 'Focus node', need: 'map', palette: false, run: (v) => v.toggleFocus() },
+	// Multi-selection actions (spec 5.11) without a palette command of their own.
+	{ id: 'key:make-tasks', name: 'multi-make-tasks', need: 'selection', palette: false, run: (v) => makeTasksIn(v, v.selectedInOrder()) },
+	{
+		id: 'key:fold-selection',
+		name: 'multi-fold',
+		need: 'selection',
+		palette: false,
+		run: (v) => {
+			const target = collapseAllTarget(v.session.doc.root, v.session.view.collapsed, v.selectedInOrder());
+			if (target) v.setCollapsed(target);
+		},
+	},
 	{ id: 'key:escape', name: 'Cancel edit', need: 'map', palette: false, run: (v) => v.escape() },
 ];
 

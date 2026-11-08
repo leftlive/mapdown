@@ -22,6 +22,7 @@ export const MOBILE_ACTIONS: readonly MobileAction[] = [
 	{ action: "move-down", icon: "arrow-down", label: "Move the current node below", command: "Move the current node below" },
 	{ action: "toggle-collapse", icon: "chevrons-down-up", label: "Toggle expand/collapse node", command: "Toggle expand/collapse node" },
 	{ action: "insert-image", icon: "image-plus", label: "insert-image", command: "insert-image" },
+	{ action: "toggle-task", icon: "list-checks", label: "toggle-task", command: "toggle-task" },
 	{ action: "undo", icon: "undo-2", label: "Undo", command: "Undo" },
 	{ action: "redo", icon: "redo-2", label: "Redo", command: "Redo" },
 ];

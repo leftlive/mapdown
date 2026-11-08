@@ -24,6 +24,12 @@ export interface MapdownSettings {
 	enableLinkPreview: boolean;
 	linkOpenMode: LinkOpenMode;
 	syncSelection: boolean;
+	/** 1.1: "done/total" on nodes with task descendants (spec 5.9). */
+	showTaskProgress: boolean;
+	/** 1.1: map notes embedded in notes show as read-only maps (spec 5.10). */
+	embedMaps: boolean;
+	/** 1.1: default height of an embedded map, px. */
+	embedHeight: number;
 }
 
 export const DEFAULT_SETTINGS: Readonly<MapdownSettings> = {
@@ -41,6 +47,9 @@ export const DEFAULT_SETTINGS: Readonly<MapdownSettings> = {
 	enableLinkPreview: true,
 	linkOpenMode: 'window',
 	syncSelection: true,
+	showTaskProgress: true,
+	embedMaps: true,
+	embedHeight: 400,
 };
 
 export const CANVAS_SIZES = [4000, 6000, 8000, 10000, 12000, 16000, 20000, 30000, 36000] as const;
@@ -100,6 +109,9 @@ export function normalizeSettings(raw: unknown): MapdownSettings {
 		enableLinkPreview: bool(r.enableLinkPreview, d.enableLinkPreview),
 		linkOpenMode: oneOf(r.linkOpenMode, LINK_MODES, d.linkOpenMode),
 		syncSelection: bool(r.syncSelection, d.syncSelection),
+		showTaskProgress: bool(r.showTaskProgress, d.showTaskProgress),
+		embedMaps: bool(r.embedMaps, d.embedMaps),
+		embedHeight: num(r.embedHeight, d.embedHeight, 150, 1200),
 	};
 	if (Array.isArray(r.strokeArray) && r.strokeArray.every((c) => typeof c === 'string')) {
 		out.strokeArray = [...r.strokeArray];

@@ -4,6 +4,24 @@
 import type { MapNode } from '../core/types.ts';
 
 /**
+ * "Collapse / expand" of the multi-selection actions (spec 5.11): when any
+ * selected node with children (the root excluded) is open, every one of them
+ * collapses; otherwise all of them open. Other nodes keep their state. Null
+ * when no selected node can collapse.
+ */
+export function collapseAllTarget(root: MapNode, collapsed: ReadonlySet<string>, selected: readonly MapNode[]): Set<string> | null {
+	const parents = selected.filter((n) => n !== root && n.children.length > 0);
+	if (parents.length === 0) return null;
+	const collapse = parents.some((n) => !collapsed.has(n.id));
+	const out = new Set(collapsed);
+	for (const n of parents) {
+		if (collapse) out.add(n.id);
+		else out.delete(n.id);
+	}
+	return out;
+}
+
+/**
  * "Toggle expand/collapse" on a selection: every selected node with children
  * (the root excluded) follows the primary node. The primary is collapsed:
  * all of them open; it is open: all of them collapse. When the primary has no

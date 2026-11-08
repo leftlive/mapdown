@@ -177,3 +177,33 @@ export function focusViewport(
 	const ax = anchorPoint(focus, side).x * scale;
 	return { scale, y: centred.y, x: side === "right" ? area.x + pad - ax : area.x + area.width - pad - ax };
 }
+
+/** Screen rect of the world rect `r`. */
+export function screenRect(vp: Viewport, r: Rect): Rect {
+	return { x: r.x * vp.scale + vp.x, y: r.y * vp.scale + vp.y, width: r.width * vp.scale, height: r.height * vp.scale };
+}
+
+/**
+ * Top-left of the multi-selection bar (spec 5.11), `bar` wide and high, for the selection's screen box
+ * `sel` inside the available `area`: centred `gap` above the part of the box that is in the area, below
+ * it when there is no room above, kept `gap` inside the area's left and right edges. With no part of the
+ * box in the area (or no box), the bar sits at the top of the area, centred. When neither above nor
+ * below has room, it goes to the top of the area too.
+ */
+export function barPosition(sel: Rect | null, bar: { width: number; height: number }, area: Rect, gap: number): Point {
+	const x0 = sel ? Math.max(sel.x, area.x) : 0;
+	const y0 = sel ? Math.max(sel.y, area.y) : 0;
+	const x1 = sel ? Math.min(sel.x + sel.width, area.x + area.width) : -1;
+	const y1 = sel ? Math.min(sel.y + sel.height, area.y + area.height) : -1;
+	const lo = area.x + gap;
+	const hi = area.x + area.width - gap - bar.width;
+	const clampX = (x: number): number => Math.max(lo, Math.min(hi, x));
+	const top = area.y + gap;
+	if (!sel || x1 < x0 || y1 < y0) return { x: clampX(area.x + (area.width - bar.width) / 2), y: top };
+	const x = clampX((x0 + x1) / 2 - bar.width / 2);
+	const above = y0 - gap - bar.height;
+	if (above >= area.y) return { x, y: above };
+	const below = y1 + gap;
+	if (below + bar.height <= area.y + area.height) return { x, y: below };
+	return { x, y: top };
+}

@@ -10,18 +10,26 @@ import { EditorView } from '@codemirror/view';
 import {
 	Keymap,
 	MarkdownView,
+	Notice,
+	Platform,
 	Plugin,
 	TFile,
 	TFolder,
 	WorkspaceLeaf,
 	addIcon,
 	editorInfoField,
+	type PaneType,
 	type ViewState,
 } from 'obsidian';
+import { splitAction, splitPartners, type SplitLeaf } from './core/splitSync.ts';
 import { visibleNodes } from './core/state.ts';
 import type { TextEdit } from './core/types.ts';
 import { available, COMMANDS } from './commands.ts';
 import { isPlainNote, openPlainNoteAsMap, registerConvert } from './convert.ts';
+import { registerInsertMap } from './insertMap.ts';
+import { EmbedManager } from './embed.ts';
+import { MapCards } from './mapCards.ts';
+import { MAP_GLYPH } from './glyph.ts';
 import { nodeAtLine, nodeLine } from './controller/sourceLines.ts';
 import { createCursorListener, editorSyncExtension } from './editorSync.ts';
 import { setLanguage, t } from './i18n.ts';
@@ -35,14 +43,7 @@ import { DOM } from './view/contract.ts';
 
 /** The glyph of brand/mapdown-glyph.svg on Obsidian's 100×100 icon canvas. */
 const ICON = `<g transform="scale(4.1667)" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-<path d="M4.5 7.5H6M2 12H6M3 16.5H6"/>
-<rect x="8.5" y="9.5" width="6" height="5" rx="1.5"/>
-<path d="M14.5 12C17.5 12 16.5 7 19.5 7"/>
-<path d="M14.5 12H19.5"/>
-<path d="M14.5 12C17.5 12 16.5 17 19.5 17"/>
-<circle cx="21" cy="7" r="1" fill="currentColor"/>
-<circle cx="21" cy="12" r="1" fill="currentColor"/>
-<circle cx="21" cy="17" r="1" fill="currentColor"/>
+${MAP_GLYPH}
 </g>`;
 
 /** A new map: an empty body (virtual root showing the file name) and an empty state. */
@@ -64,6 +65,12 @@ export default class MapdownPlugin extends Plugin {
 	private bypass = new WeakMap<WorkspaceLeaf, string>();
 	private lastMapView: MapView | null = null;
 	private headerButtons = new WeakMap<MarkdownView, HTMLElement>();
+	/** The split-with-sync buttons (5.6) of Markdown and map views. */
+	private splitButtons = new WeakMap<MarkdownView | MapView, HTMLElement>();
+	/** Maps embedded in notes (spec 5.10). */
+	private embeds: EmbedManager | null = null;
+	/** Map embeds inside map nodes, drawn as cards (spec 5.10). */
+	cards!: MapCards;
 
 	readonly testApi: TestApi = {
 		selection: () => {
@@ -110,6 +117,8 @@ export default class MapdownPlugin extends Plugin {
 
 		this.registerView(VIEW_TYPE, (leaf) => new MapView(leaf, this));
 		this.registerHoverLinkSource('mapdown', { display: 'Mapdown', defaultMod: true });
+		this.cards = new MapCards(this);
+		this.embeds = new EmbedManager(this);
 		this.patchSetViewState();
 
 		this.addRibbonIcon('mapdown', t('Create New MindMap'), () => void this.newMindMap());
@@ -149,11 +158,27 @@ export default class MapdownPlugin extends Plugin {
 		this.settings = normalizeSettings(this.rawData);
 	}
 
+	/** Hidden flag (not a setting, not in the tab): the embed first-use tip was shown. Kept in data.json. */
+	get embedTipShown(): boolean {
+		const r = this.rawData;
+		return r !== null && typeof r === 'object' && (r as Record<string, unknown>).embedTipShown === true;
+	}
+
+	/** Set the flag and save at once; `undefined` removes the key (tests restore the user's data this way). */
+	async setEmbedTipShown(v: boolean | undefined): Promise<void> {
+		const raw = this.rawData !== null && typeof this.rawData === 'object' ? { ...(this.rawData as Record<string, unknown>) } : {};
+		if (v === undefined) delete raw.embedTipShown;
+		else raw.embedTipShown = v;
+		this.rawData = raw;
+		await this.saveData(settingsForSave(raw, this.settings));
+	}
+
 	async saveSettings(): Promise<void> {
 		const out = settingsForSave(this.rawData, this.settings);
 		this.rawData = out;
 		await this.saveData(out);
 		for (const v of this.mapViews()) v.applySettings();
+		this.embeds?.applySettings();
 	}
 
 	// ------------------------------------------------------------ views
@@ -279,6 +304,24 @@ export default class MapdownPlugin extends Plugin {
 		return file;
 	}
 
+	/** The tab to open a map in: with `pane` false the tab showing `el` (not always the active one), else a new one. */
+	leafFor(pane: PaneType | boolean, el: HTMLElement): WorkspaceLeaf {
+		const ws = this.app.workspace;
+		const mine: WorkspaceLeaf[] = [];
+		if (pane === false) ws.iterateAllLeaves((l) => {
+			if (l.view.containerEl.contains(el)) mine.push(l);
+		});
+		return mine[0] ?? ws.getLeaf(pane);
+	}
+
+	/** Open `file` as a map in `leaf` and, with `line`, select and centre the node on that 0-based file line (spec 5.10). */
+	async openMapAt(leaf: WorkspaceLeaf, file: TFile, line: number | null): Promise<void> {
+		this.setFileMode(leaf, file.path, 'mindmap');
+		await leaf.setViewState({ type: VIEW_TYPE, state: { file: file.path }, active: true });
+		this.app.workspace.setActiveLeaf(leaf, { focus: true });
+		if (line !== null && leaf.view instanceof MapView) leaf.view.revealLine(line);
+	}
+
 	openLink(href: string, sourcePath: string, evt: MouseEvent): void {
 		if (/^[a-z][a-z0-9+.-]*:/i.test(href)) {
 			window.open(href, '_blank');
@@ -312,6 +355,18 @@ export default class MapdownPlugin extends Plugin {
 			},
 		});
 		this.addCommand({
+			id: 'toggle-split-sync',
+			name: t('toggle-split-sync'),
+			checkCallback: (checking) => {
+				if (Platform.isPhone) return false;
+				const ws = this.app.workspace;
+				const view = ws.getActiveViewOfType(MapView) ?? ws.getActiveViewOfType(MarkdownView);
+				if (!view || !this.splitInfo(view.leaf)) return false;
+				if (!checking) void this.toggleSplitSync(view.leaf);
+				return true;
+			},
+		});
+		this.addCommand({
 			id: 'toggle-selection-sync',
 			name: t('toggle-selection-sync'),
 			callback: () => {
@@ -341,6 +396,7 @@ export default class MapdownPlugin extends Plugin {
 		});
 		registerXmind(this);
 		registerConvert(this);
+		registerInsertMap(this);
 		for (const command of COMMANDS) {
 			if (!command.palette) continue;
 			this.addCommand({
@@ -372,6 +428,85 @@ export default class MapdownPlugin extends Plugin {
 		}));
 	}
 
+	// ------------------------------------------------------------ split with sync (spec 5.6)
+
+	/** `leaf` as a split-sync tab: a map, or a Markdown view of a map note. Else null. */
+	private splitInfo(leaf: WorkspaceLeaf): SplitLeaf<WorkspaceLeaf, unknown, unknown> | null {
+		const view = leaf.view;
+		let kind: SplitLeaf<WorkspaceLeaf, unknown, unknown>['kind'];
+		if (view instanceof MapView) kind = 'map';
+		else if (view instanceof MarkdownView && this.isMapFileSync(view.file)) kind = 'markdown';
+		else return null;
+		const path = view.file?.path ?? null;
+		return path === null ? null : { leaf, kind, path, root: leaf.getRoot(), parent: leaf.parent };
+	}
+
+	/** The tabs holding the other form of `leaf`'s note in another split of its window. */
+	splitPartnerLeaves(leaf: WorkspaceLeaf): WorkspaceLeaf[] {
+		const self = this.splitInfo(leaf);
+		if (!self) return [];
+		const all: SplitLeaf<WorkspaceLeaf, unknown, unknown>[] = [];
+		this.app.workspace.iterateAllLeaves((l) => {
+			// any Markdown view of the note counts, map note or not (a plain Markdown tab of it)
+			const view = l.view;
+			if (view instanceof MapView) all.push({ leaf: l, kind: 'map', path: view.file?.path ?? null, root: l.getRoot(), parent: l.parent });
+			else if (view instanceof MarkdownView) all.push({ leaf: l, kind: 'markdown', path: view.file?.path ?? null, root: l.getRoot(), parent: l.parent });
+		});
+		return splitPartners(self, all);
+	}
+
+	/** The button / command: close the other form, or split to the right with it and sync once. */
+	async toggleSplitSync(orig: WorkspaceLeaf): Promise<void> {
+		const self = this.splitInfo(orig);
+		if (!self) return;
+		const partners = this.splitPartnerLeaves(orig);
+		if (splitAction(partners) === 'close') {
+			for (const p of partners) p.detach();
+			this.updateHeaderButtons();
+			return;
+		}
+		const view = orig.view;
+		const file = view instanceof MapView || view instanceof MarkdownView ? view.file : null;
+		if (!file) return;
+		const ws = this.app.workspace;
+		if (view instanceof MapView) await view.flush();
+		const wasOff = !this.settings.syncSelection;
+		if (wasOff) {
+			this.settings.syncSelection = true;
+			await this.saveSettings();
+			new Notice(t('Split sync enabled'));
+		}
+		const other = ws.createLeafBySplit(orig, 'vertical', false);
+		if (self.kind === 'map') {
+			// Markdown is wanted here although the note is a map: skip the redirect once, and keep it Markdown there.
+			this.setFileMode(other, file.path, 'markdown');
+			this.bypass.set(other, file.path);
+			await other.setViewState({ type: 'markdown', state: { file: file.path }, active: false });
+		} else {
+			this.setFileMode(other, file.path, 'mindmap');
+			await other.setViewState({ type: VIEW_TYPE, state: { file: file.path }, active: false });
+		}
+		ws.setActiveLeaf(orig, { focus: true });
+		if (self.kind === 'map' && view instanceof MapView) view.syncOnce('map');
+		else if (other.view instanceof MapView) other.view.syncOnce('markdown');
+		this.updateHeaderButtons();
+	}
+
+	/** Add (once) and refresh the split-sync button of a view: shown for map notes, pressed while the other form is open. */
+	private updateSplitButton(view: MarkdownView | MapView): void {
+		if (Platform.isPhone) return;
+		const eligible = view instanceof MapView || this.isMapFileSync(view.file);
+		let button = this.splitButtons.get(view);
+		if (!button) {
+			if (!eligible) return;
+			button = view.addAction('columns-2', t('Split with sync'), () => void this.toggleSplitSync(view.leaf));
+			button.addClass(DOM.splitAction);
+			this.splitButtons.set(view, button);
+		}
+		button.toggle(eligible);
+		button.toggleClass('is-active', eligible && this.splitPartnerLeaves(view.leaf).length > 0);
+	}
+
 	/** 5.5: a Mapdown button in the header of Markdown views: map notes switch to the map, plain notes ask (6.2). */
 	private updateHeaderButtons(): void {
 		for (const leaf of this.app.workspace.getLeavesOfType('markdown')) {
@@ -390,7 +525,9 @@ export default class MapdownPlugin extends Plugin {
 			const isMap = this.isMapFileSync(view.file);
 			button.toggle(isMap || isPlainNote(this, view.file));
 			button.setAttribute('aria-label', isMap ? t('Open as mind map') : t('Open as a mind map…'));
+			this.updateSplitButton(view);
 		}
+		for (const view of this.mapViews()) this.updateSplitButton(view);
 	}
 
 	// ------------------------------------------------------------ editor -> map

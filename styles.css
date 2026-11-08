@@ -56,12 +56,12 @@
 
 .mapdown-edges path {
 	fill: none;
-	stroke-width: 1.5px;
+	stroke-width: 1.2px;
 	stroke-linecap: round;
 }
 
 .mapdown-edges path.is-root-edge {
-	stroke-width: 2.5px;
+	stroke-width: 2px;
 }
 
 /* ---- nodes ------------------------------------------------------------
@@ -75,11 +75,12 @@
 	--mapdown-pad-x: 14px;
 	--mapdown-pad-y: 6px;
 	/* Branch-coloured glow on the side facing the parent (the first-level colour
-	   wash sits on the same side). Right of the root by default. */
-	--mapdown-node-glow: calc(-1 * var(--mapdown-glow-size, 10px)) 0 calc(1.6 * var(--mapdown-glow-size, 10px)) calc(-1 * var(--mapdown-glow-size, 10px)) var(--mapdown-branch-color, transparent);
+	   wash sits on the same side). Right of the root by default. The inset is a fixed
+	   6px, not the glow size, so one-line and taller nodes get the same glow. */
+	--mapdown-node-glow: calc(-0.5 * var(--mapdown-glow-size, 10px)) 0 calc(0.8 * var(--mapdown-glow-size, 10px)) -6px color-mix(in srgb, var(--mapdown-branch-color, transparent) 35%, transparent);
 	--mapdown-highlight: rgba(255, 255, 255, 0.75);
-	--mapdown-shadow-near: rgba(15, 23, 42, 0.07);
-	--mapdown-shadow-far: rgba(15, 23, 42, 0.16);
+	--mapdown-shadow-near: rgba(15, 23, 42, 0.05);
+	--mapdown-shadow-far: rgba(15, 23, 42, 0.1);
 	position: absolute;
 	left: 0;
 	top: 0;
@@ -99,12 +100,12 @@
 
 .theme-dark .mapdown-node {
 	--mapdown-highlight: rgba(255, 255, 255, 0.07);
-	--mapdown-shadow-near: rgba(0, 0, 0, 0.35);
-	--mapdown-shadow-far: rgba(0, 0, 0, 0.55);
+	--mapdown-shadow-near: rgba(0, 0, 0, 0.25);
+	--mapdown-shadow-far: rgba(0, 0, 0, 0.4);
 }
 
 .mapdown-node.is-left {
-	--mapdown-node-glow: var(--mapdown-glow-size, 10px) 0 calc(1.6 * var(--mapdown-glow-size, 10px)) calc(-1 * var(--mapdown-glow-size, 10px)) var(--mapdown-branch-color, transparent);
+	--mapdown-node-glow: calc(0.5 * var(--mapdown-glow-size, 10px)) 0 calc(0.8 * var(--mapdown-glow-size, 10px)) -6px color-mix(in srgb, var(--mapdown-branch-color, transparent) 35%, transparent);
 }
 
 /* Levels: each step down is smaller, lighter and sits lower. */
@@ -127,29 +128,29 @@
 		linear-gradient(180deg, var(--background-primary), color-mix(in srgb, var(--background-secondary) 60%, var(--background-primary)));
 	border-color: color-mix(in srgb, var(--mapdown-branch-color, var(--background-modifier-border)) 40%, var(--background-modifier-border));
 	box-shadow: inset 0 1px 0 var(--mapdown-highlight), 0 1px 2px var(--mapdown-shadow-near), 0 5px 14px -6px var(--mapdown-shadow-far), var(--mapdown-node-glow);
+	/* a tighter, lighter glow than other levels, so it does not run into the wash below */
+	--mapdown-node-glow: calc(-0.4 * var(--mapdown-glow-size, 10px)) 0 calc(0.9 * var(--mapdown-glow-size, 10px)) -6px color-mix(in srgb, var(--mapdown-branch-color, transparent) 42%, transparent);
 }
 
-/* The branch colour is deepest along the side facing the parent and fades inwards.
-   Its front curves in towards that edge in the middle, leaving room for the text. */
+.mapdown-node.is-level-1.is-left {
+	--mapdown-node-glow: calc(0.4 * var(--mapdown-glow-size, 10px)) 0 calc(0.9 * var(--mapdown-glow-size, 10px)) -6px color-mix(in srgb, var(--mapdown-branch-color, transparent) 42%, transparent);
+}
+
+/* A short wash of the branch colour along the side facing the parent, fading inwards. */
 .mapdown-node.is-level-1::before {
 	content: "";
 	position: absolute;
 	top: 0;
 	bottom: 0;
 	left: 0;
-	width: 28px;
+	width: 12px;
 	max-width: 100%;
 	border-radius: inherit;
 	pointer-events: none;
-	background: radial-gradient(ellipse 40px 140% at 28px 50%,
-		transparent 36%,
-		color-mix(in srgb, var(--mapdown-branch-color, transparent) 8%, transparent) 46%,
-		color-mix(in srgb, var(--mapdown-branch-color, transparent) 24%, transparent) 57%,
-		color-mix(in srgb, var(--mapdown-branch-color, transparent) 45%, transparent) 69%,
-		color-mix(in srgb, var(--mapdown-branch-color, transparent) 64%, transparent) 83%,
-		color-mix(in srgb, var(--mapdown-branch-color, transparent) 76%, transparent) 100%);
-	-webkit-mask-image: linear-gradient(90deg, #000 30%, transparent);
-	mask-image: linear-gradient(90deg, #000 30%, transparent);
+	background: linear-gradient(90deg,
+		color-mix(in srgb, var(--mapdown-branch-color, transparent) 50%, transparent),
+		color-mix(in srgb, var(--mapdown-branch-color, transparent) 16%, transparent) 40%,
+		transparent);
 }
 
 .mapdown-node.is-level-1.is-left::before {
@@ -209,6 +210,19 @@
 	margin-bottom: 0;
 }
 
+/* callouts in nodes (spec 5.6): always expanded; the title does not fold them */
+.mapdown-node-content .callout.is-collapsed > .callout-content {
+	display: block !important;
+}
+
+.mapdown-node-content .callout > .callout-title {
+	pointer-events: none;
+}
+
+.mapdown-node-content .callout .callout-fold {
+	display: none;
+}
+
 .mapdown-node-content ul {
 	padding-inline-start: 1.2em;
 }
@@ -244,7 +258,8 @@
 	-webkit-user-drag: none;
 }
 
-.mapdown-image-picker-path {
+.mapdown-image-picker-path,
+.mapdown-map-picker-path {
 	display: block;
 	color: var(--text-muted);
 }
@@ -269,19 +284,30 @@
 	box-shadow: 0 0 0 4px color-mix(in srgb, var(--interactive-accent) 24%, transparent), 0 4px 12px rgba(0, 0, 0, 0.12);
 }
 
-/* Selection: a crisp accent ring on the border, a thin soft halo, an accent-tinted lift
-   and a faint tint inside. Every selected node looks the same; the glow follows nodeGlowSize. */
+/* Selection: the theme's accent hue at a clear saturation (many themes use a near-grey
+   accent), drawn as a 2px ring with a 2px gap outside the border and a faint tint inside.
+   Every selected node looks the same. */
+.mapdown-node {
+	--mapdown-select: var(--interactive-accent);
+}
+
+@supports (color: hsl(from red h max(s, 75) clamp(40, l, 50))) {
+	.mapdown-node {
+		--mapdown-select: hsl(from var(--interactive-accent) h max(s, 75) clamp(40, l, 50));
+	}
+
+	.theme-dark .mapdown-node {
+		--mapdown-select: hsl(from var(--interactive-accent) h max(s, 75) clamp(55, l, 65));
+	}
+}
+
 .mapdown-node.is-selected {
-	border-color: var(--interactive-accent);
+	border-color: var(--mapdown-select);
 	outline: none;
-	translate: 0 -1px;
 	box-shadow:
-		inset 0 0 0 100vmax color-mix(in srgb, var(--interactive-accent) 5%, transparent),
-		inset 0 1px 0 var(--mapdown-highlight),
-		0 0 0 0.5px var(--interactive-accent),
-		0 0 0 3.5px color-mix(in srgb, var(--interactive-accent) 16%, transparent),
-		0 6px 16px -6px color-mix(in srgb, var(--interactive-accent) 45%, transparent),
-		0 0 var(--mapdown-glow-size, 10px) color-mix(in srgb, var(--interactive-accent) 18%, transparent);
+		inset 0 0 0 100vmax color-mix(in srgb, var(--mapdown-select) 6%, transparent),
+		0 0 0 2px var(--background-primary),
+		0 0 0 4px var(--mapdown-select);
 }
 
 .mapdown-node.is-selected.is-search-current {
@@ -392,6 +418,134 @@
 	.mapdown-node-toggle::after {
 		transition: none;
 	}
+}
+
+/* ---- task checkboxes and progress (spec 5.9) --------------------------
+   Sizes are in em of the node's font; keep them in sync with TASK_BOX_EM,
+   TASK_GAP_EM, PROGRESS_SCALE and PROGRESS_GAP_EM in src/view/measure.ts. */
+
+.mapdown-node-content.has-task-decor {
+	display: flex;
+	align-items: baseline;
+}
+
+.mapdown-task-text {
+	min-width: 0;
+}
+
+/* an empty task still takes one line, like the estimate */
+.mapdown-task-text:empty::before {
+	content: "\200b";
+}
+
+.mapdown-task-text > :first-child {
+	margin-top: 0;
+}
+
+.mapdown-task-text > :last-child {
+	margin-bottom: 0;
+}
+
+/* the hit area; the theme's checkbox is drawn inside and never takes the click */
+.mapdown-node .mapdown-task-checkbox {
+	/* the theme draws border, fill and tick at --checkbox-size: match the box */
+	--checkbox-size: 1em;
+	position: relative;
+	display: inline-flex;
+	flex: none;
+	align-self: flex-start;
+	width: 1em;
+	height: 1em;
+	margin: 0;
+	margin-inline-end: 0.4em;
+	/* centre the box on the first line (line height 1.45) */
+	margin-top: 0.225em;
+	cursor: pointer;
+}
+
+/* read-only maps (embeds) show the state but do not toggle it */
+.mapdown-task-checkbox.is-readonly {
+	cursor: default;
+}
+
+/* a larger target for fingers, without changing the layout */
+.mapdown-task-checkbox::after {
+	content: "";
+	position: absolute;
+	inset: -0.35em;
+}
+
+.mapdown-node .mapdown-task-checkbox > input.task-list-item-checkbox {
+	flex: none;
+	width: 1em;
+	height: 1em;
+	margin: 0;
+	font-size: inherit;
+	pointer-events: none;
+}
+
+/*
+ * A map embedded in a node's text (spec 5.10): one line, as tall as the text, in the theme's
+ * internal-link colours. Widths match CARD_* in src/view/measure.ts: padding 0.3em, icon 1em,
+ * gaps 0.25em, arrow 0.8em.
+ */
+.mapdown-node .mapdown-map-card {
+	display: inline;
+	padding: 0 0.3em;
+	border-radius: var(--radius-s);
+	color: var(--link-color);
+	background: color-mix(in srgb, var(--link-color) 12%, transparent);
+	white-space: nowrap;
+	cursor: pointer;
+}
+
+.mapdown-node .mapdown-map-card:hover {
+	color: var(--link-color-hover);
+	background: color-mix(in srgb, var(--link-color) 20%, transparent);
+}
+
+.mapdown-map-card-icon,
+.mapdown-map-card-arrow {
+	display: inline;
+}
+
+.mapdown-map-card-icon {
+	margin-inline-end: 0.25em;
+}
+
+.mapdown-map-card-arrow {
+	margin-inline-start: 0.25em;
+}
+
+.mapdown-map-card .svg-icon {
+	width: 1em;
+	height: 1em;
+	vertical-align: -0.15em;
+	stroke-width: 2px;
+}
+
+.mapdown-map-card-arrow .svg-icon {
+	width: 0.8em;
+	height: 0.8em;
+	vertical-align: -0.05em;
+}
+
+.mapdown-node.is-task-done .mapdown-task-text {
+	color: var(--checklist-done-color, var(--text-muted));
+	text-decoration: var(--checklist-done-decoration, line-through);
+}
+
+.mapdown-node .mapdown-task-progress {
+	flex: none;
+	margin-inline-start: 0.6em;
+	font-size: 0.75em;
+	font-weight: 400;
+	color: var(--text-muted);
+	white-space: nowrap;
+}
+
+.mapdown-task-progress.is-complete {
+	color: var(--text-success, var(--color-green));
 }
 
 /* ---- inline editor ---------------------------------------------------- */
@@ -726,6 +880,80 @@
 	transition: opacity 0.2s;
 }
 
+/* ---- multi-selection actions (spec 5.11) --------------------------------
+   The bar floats above the selected nodes (positioned by multiActionBar.ts);
+   the right-click column looks like the node menu. */
+
+.mapdown-multi-bar {
+	position: absolute;
+	z-index: 3;
+	display: none;
+	gap: 2px;
+	padding: 2px 4px;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-m);
+	background: var(--background-primary);
+	box-shadow: var(--shadow-s);
+}
+
+.mapdown-multi-bar.is-shown {
+	display: flex;
+}
+
+/* out of the way while a box is dragged or nodes are moved */
+.mapdown-map.is-box-selecting ~ .mapdown-multi-bar.is-shown,
+.mapdown-map.is-node-dragging ~ .mapdown-multi-bar.is-shown {
+	display: none;
+}
+
+.mapdown-multi-bar .clickable-icon {
+	display: flex;
+	justify-content: center;
+	align-items: center;
+	width: 28px;
+	height: 28px;
+	padding: 0;
+	cursor: pointer;
+}
+
+.mapdown-multi-bar .clickable-icon svg {
+	width: 16px;
+	height: 16px;
+}
+
+.mapdown-multi-menu {
+	position: absolute;
+	z-index: 3;
+	width: 32px;
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	padding: 4px 0;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-s);
+	background: var(--background-primary);
+	box-shadow: 0px 4px 12px rgba(0, 0, 0, 0.5);
+}
+
+.theme-light .mapdown-multi-menu {
+	box-shadow: 0px 4px 12px rgba(0, 0, 0, 0.15);
+}
+
+.mapdown-multi-menu .clickable-icon {
+	display: flex;
+	justify-content: center;
+	align-items: center;
+	margin: 4px 0;
+	width: 100%;
+	padding: 0;
+	cursor: pointer;
+}
+
+.mapdown-multi-menu .clickable-icon svg {
+	width: 18px;
+	height: 18px;
+}
+
 .mapdown-file-suggest {
 	position: fixed;
 	z-index: var(--layer-popover);
@@ -973,4 +1201,130 @@
 		0 0 0 4px color-mix(in srgb, var(--interactive-accent) 20%, transparent),
 		0 0 var(--mapdown-glow-size, 10px) color-mix(in srgb, var(--interactive-accent) 35%, transparent),
 		0 0 var(--mapdown-focus-glow-size, 150px) color-mix(in srgb, var(--interactive-accent) 45%, transparent);
+}
+
+/* ---- maps embedded in notes (spec 5.10, src/embed.ts): the renderer in a box
+   inside Obsidian's .internal-embed, whose own content is hidden meanwhile. */
+
+.mapdown-embed {
+	display: none;
+}
+
+.mapdown-embed-host .markdown-embed-content:not(.mapdown-embed *),
+.mapdown-embed-host .markdown-embed-link:not(.mapdown-embed *) {
+	display: none;
+}
+
+.mapdown-embed-host > .mapdown-embed {
+	display: block;
+	position: relative;
+	height: var(--mapdown-embed-height, 400px);
+	overflow: hidden;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-m);
+	background-color: var(--background-primary);
+	/* the minimap's offsets read these (set on map views only) */
+	--mapdown-view-bottom: 0px;
+	--mapdown-bottom-inset: 0px;
+}
+
+/* active (clicked): the accent border says the wheel now pans the map */
+.mapdown-embed.is-active {
+	border-color: var(--interactive-accent);
+	box-shadow: 0 0 0 1px var(--interactive-accent);
+}
+
+/* the hint on a plain wheel while inactive; it never takes the pointer */
+.mapdown-embed-hint {
+	position: absolute;
+	top: 50%;
+	left: 50%;
+	z-index: 4;
+	max-width: 80%;
+	transform: translate(-50%, -50%);
+	padding: var(--size-4-2) var(--size-4-4);
+	border-radius: var(--radius-m);
+	background: var(--background-secondary);
+	border: 1px solid var(--background-modifier-border);
+	box-shadow: var(--shadow-s);
+	color: var(--text-normal);
+	font-size: var(--font-ui-small);
+	text-align: center;
+	opacity: 0;
+	transition: opacity 0.3s ease;
+	pointer-events: none;
+}
+
+.mapdown-embed-hint.is-shown {
+	opacity: 1;
+}
+
+/* one finger scrolls the note; two fingers pan and pinch the map (src/view/renderer.ts) */
+.mapdown-embed .mapdown-map {
+	touch-action: pan-x pan-y;
+}
+
+/* subtree embeds draw the node like focus mode, without its glow */
+.mapdown-embed .mapdown-node.is-focus-root {
+	box-shadow: none;
+}
+
+.mapdown-embed-actions {
+	position: absolute;
+	top: var(--size-4-2);
+	right: var(--size-4-2);
+	z-index: 3;
+	display: flex;
+	gap: var(--size-4-1);
+	opacity: 0;
+	transition: opacity 0.15s ease;
+}
+
+.mapdown-embed:hover .mapdown-embed-actions,
+.mapdown-embed:focus-within .mapdown-embed-actions,
+.is-mobile .mapdown-embed-actions {
+	opacity: 1;
+}
+
+.mapdown-embed-actions .clickable-icon {
+	background: var(--background-primary);
+	border: 1px solid var(--background-modifier-border);
+	box-shadow: var(--shadow-s);
+}
+
+/* the first-use tip: looks like an Obsidian notice, top centre, clear of the action buttons */
+.mapdown-embed-tip {
+	position: absolute;
+	top: var(--size-4-2);
+	left: 50%;
+	z-index: 5;
+	display: flex;
+	align-items: flex-start;
+	gap: var(--size-4-2);
+	box-sizing: border-box;
+	width: max-content;
+	max-width: calc(100% - 2 * (var(--size-4-2) + 80px));
+	transform: translateX(-50%);
+	padding: var(--size-4-2) var(--size-4-2) var(--size-4-2) var(--size-4-3);
+	border-radius: var(--radius-m);
+	background: var(--background-secondary);
+	border: 1px solid var(--background-modifier-border);
+	box-shadow: var(--shadow-s);
+	color: var(--text-normal);
+	font-size: var(--font-ui-small);
+	line-height: var(--line-height-tight);
+	opacity: 0;
+	transition: opacity 0.4s ease;
+}
+
+.mapdown-embed-tip.is-shown {
+	opacity: 1;
+}
+
+.mapdown-embed-tip-text {
+	padding-top: var(--size-2-2);
+}
+
+.mapdown-embed-tip .mapdown-embed-tip-close {
+	flex: none;
 }

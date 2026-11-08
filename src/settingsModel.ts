@@ -98,6 +98,12 @@ export function applySetting(current: MapdownSettings, key: SettingKey, value: u
 			next.focusGlowSize = clampStep(n, 0, 400, 10);
 			return next;
 		}
+		case 'embedHeight': {
+			const n = finite(value);
+			if (n === null) return null;
+			next.embedHeight = clampStep(n, 150, 1200, 50);
+			return next;
+		}
 		case 'focusOverlayOpacity': {
 			// The slider runs 0-80 in steps of 5; the stored value is that divided by 100.
 			const n = finite(value);
@@ -108,6 +114,8 @@ export function applySetting(current: MapdownSettings, key: SettingKey, value: u
 		case 'focusOnMove':
 		case 'enableLinkPreview':
 		case 'syncSelection':
+		case 'showTaskProgress':
+		case 'embedMaps':
 			if (typeof value !== 'boolean') return null;
 			next[key] = value;
 			return next;

@@ -26,6 +26,8 @@ export interface SearchHost {
 	tree(): MapNode;
 	/** Text shown for the root when it differs from its node text (virtual root). */
 	rootText(): string | undefined;
+	/** Labels of the map cards (spec 5.10): a card is searched by the name it shows. */
+	cards?(): ReadonlyMap<string, string>;
 	view(): ViewState;
 	setView(view: ViewState): void;
 	render(): void;
@@ -158,7 +160,7 @@ export class SearchBar {
 		const changed = query !== this.query;
 		this.query = query;
 		const view = this.host.view();
-		this.matchList = findMatches(this.host.tree(), query, { rootText: this.host.rootText(), scopeId: view.focus });
+		this.matchList = findMatches(this.host.tree(), query, { rootText: this.host.rootText(), scopeId: view.focus, cards: this.host.cards?.() });
 		this.matchSet = new Set(this.matchList);
 		if (changed || (this.currentId !== null && !this.matchSet.has(this.currentId))) {
 			// A new query starts over: nothing current, earlier branches folded back.

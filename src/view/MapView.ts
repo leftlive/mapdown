@@ -13,8 +13,9 @@
 
 import { Annotation, Transaction, type ChangeSpec } from '@codemirror/state';
 import type { EditorView } from '@codemirror/view';
-import { MarkdownRenderer, MarkdownView, Notice, Platform, Scope, TextFileView, setIcon, type HoverParent, type HoverPopover, type Menu, type TFile, type WorkspaceLeaf } from 'obsidian';
+import { MarkdownRenderer, MarkdownView, Notice, Platform, Scope, TextFileView, setIcon, type App, type Component, type HoverParent, type HoverPopover, type Menu, type TFile, type WorkspaceLeaf } from 'obsidian';
 import { DEFAULT_PALETTE } from '../core/layout.ts';
+import { taskProgress, type TaskCount } from '../core/tasks.ts';
 import { childPosition, findNodeAt, insertNodes, insertSibling, moveNodes, pasteMarkdown, setText, type NodeInput, type Position } from '../core/ops.ts';
 import { parseDocument } from '../core/parse.ts';
 import {
@@ -30,7 +31,7 @@ import {
 	visibleNodes,
 	collapsedIdsForSave,
 } from '../core/state.ts';
-import type { LayoutDirection, MapNode, TextEdit } from '../core/types.ts';
+import type { LayoutDirection, MapNode, Point, TextEdit } from '../core/types.ts';
 import {
 	fromClipboardJson,
 	jsonFromClipboardHtml,
@@ -39,6 +40,7 @@ import {
 	toClipboardHtml,
 	toClipboardJson,
 	toClipboardOutline,
+	toggleTaskSteps,
 	type Arrow,
 	type ClipNode,
 } from '../controller/actions.ts';
@@ -47,15 +49,18 @@ import { applyTextEdits, composeEdits, diffTexts } from '../controller/textEdits
 import { COMMAND_BY_ID, deleteSelection, runCommand } from '../commands.ts';
 import { SelectionSync, type SyncEnv } from '../controller/selectionSync.ts';
 import { stateJson, toMapText } from '../controller/convertNote.ts';
-import { cursorTarget, nodeLine } from '../controller/sourceLines.ts';
+import { cursorTarget, nodeAtLine, nodeLine } from '../controller/sourceLines.ts';
 import { getEditorView, revealLineInMarkdown } from '../editorSync.ts';
 import { FileSuggest } from '../fileSuggest.ts';
-import { t } from '../i18n.ts';
+import { t, type StringKey } from '../i18n.ts';
 import { installKeymap, type KeyTarget } from '../keymap.ts';
 import { availablePath, fileNameFromRoot, folderOf, writeSafetyCopy } from '../save.ts';
 import type MapdownPlugin from '../main.ts';
-import { DOM, type EditorHandle, type MapRenderer, type Modifiers, type DropPlace, type RenderEvents, type RenderHost } from './contract.ts';
+import { DOM, type EditorHandle, type MapRenderer, type Modifiers, type DropPlace, type RenderEvents, type RenderHost, type RenderModel } from './contract.ts';
+import type { MapdownSettings } from '../settings.ts';
 import { MobileToolbar } from './mobileToolbar.ts';
+import { MultiActionBar } from './multiActionBar.ts';
+import { isMultiSelection } from './multiActions.ts';
 import { addImageFiles, installImageDrop, openImagePicker } from './nodeImages.ts';
 import { appendLine, extensionForMime, pastedImageName } from '../nodeImage.ts';
 import { createRenderer } from './renderer.ts';
@@ -64,6 +69,26 @@ import type { Viewport } from './viewport.ts';
 import { exportMap, showExportMenu, type ExportFormat } from '../export/exporter.ts';
 
 export const VIEW_TYPE = 'mindmapViewUpgraded';
+
+/** The parts of a render model that come from the settings (map views and embedded maps). */
+export function settingsLook(s: MapdownSettings): Pick<RenderModel, 'direction' | 'palette' | 'fontSize' | 'nodeMaxWidth' | 'nodeGlowSize' | 'placeholder'> {
+	return {
+		direction: s.layoutDirect,
+		palette: s.strokeArray && s.strokeArray.length > 0 ? s.strokeArray : DEFAULT_PALETTE,
+		fontSize: s.fontSize,
+		nodeMaxWidth: s.nodeMaxWidth,
+		nodeGlowSize: s.nodeGlowSize,
+		placeholder: t('Placeholder'),
+	};
+}
+
+/** Markdown in nodes rendered for `component`, links relative to `path`; motion read from `el`'s window. */
+export function markdownHost(app: App, path: () => string, component: Component, el: HTMLElement): RenderHost {
+	return {
+		renderMarkdown: (text, target) => MarkdownRenderer.render(app, text, target, path(), component),
+		reducedMotion: () => el.win.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false,
+	};
+}
 
 /** Marks transactions this plugin dispatches, so the editor listener ignores their echo. */
 export const mapdownEdit = Annotation.define<boolean>();
@@ -99,6 +124,8 @@ export class MapView extends TextFileView implements KeyTarget, HoverParent {
 	private focusSavedViewport: Viewport | null = null;
 	private toolbarEl: HTMLElement | null = null;
 	private mobileBar: MobileToolbar | null = null;
+	/** Multi-selection actions (spec 5.11): the floating bar (desktop) and the right-click menu. */
+	private multiBar: MultiActionBar | null = null;
 	private mapEl: HTMLElement | null = null;
 	private menuEl: HTMLElement | null = null;
 	private menuFor: string | null = null;
@@ -116,6 +143,11 @@ export class MapView extends TextFileView implements KeyTarget, HoverParent {
 	private convertPending = false;
 	private converting: Promise<boolean> | null = null;
 	private lastBoxSelect = 0;
+	/** File line to select once the text is loaded (opened from an embedded map). */
+	private pendingLine: number | null = null;
+	/** Task progress of the last parsed tree (spec 5.9); recounted only when the tree changes. */
+	private progress: { root: MapNode; counts: Map<string, TaskCount> } | null = null;
+	private cards: { root: MapNode; version: number; path: string; labels: ReadonlyMap<string, string> } | null = null;
 	private draftTimer: number | null = null;
 	private editorTimer: number | null = null;
 	private editorBase: string | null = null;
@@ -125,6 +157,8 @@ export class MapView extends TextFileView implements KeyTarget, HoverParent {
 	private lastEditorView: MarkdownView | null = null;
 	/** Split-view selection sync with a Markdown view of the same note (spec 5.6). */
 	private readonly sync = new SelectionSync();
+	/** A one-time sync (5.6) waits for the note to load. */
+	private syncOnLoad = false;
 	/** Exports in progress; closing the view cancels them quietly. */
 	private readonly exports = new Set<AbortController>();
 
@@ -200,14 +234,17 @@ export class MapView extends TextFileView implements KeyTarget, HoverParent {
 		this.menuEl = el.createDiv({ cls: DOM.nodeMenu });
 		this.menuEl.hide();
 		this.buildMenu(this.menuEl);
+		this.multiBar = new MultiActionBar(el, this, !Platform.isMobile);
 		installImageDrop(this);
 		this.scope = new Scope(this.app.scope);
 		installKeymap(this.scope, this);
 		const doc = el.ownerDocument;
 		this.registerDomEvent(doc, 'keyup', (evt) => this.onKeyUp(evt));
 		this.registerDomEvent(doc, 'pointerdown', (evt) => {
-			if (this.menuEl && !this.menuEl.contains(evt.target as Node)) this.hideMenu();
+			if (this.menuEl && !this.menuEl.contains(evt.target as Node) && !this.multiBar?.ownsTarget(evt.target)) this.hideMenu();
 		});
+		// a map card's label changed (spec 5.10)
+		this.register(this.plugin.cards.subscribe(() => this.render()));
 		this.applySettings();
 		if (this.loaded) this.render();
 		await super.onOpen();
@@ -224,6 +261,8 @@ export class MapView extends TextFileView implements KeyTarget, HoverParent {
 		this.search = null;
 		this.mobileBar?.destroy();
 		this.mobileBar = null;
+		this.multiBar?.destroy();
+		this.multiBar = null;
 		this.renderer?.destroy();
 		this.renderer = null;
 		await super.onClose();
@@ -301,9 +340,28 @@ export class MapView extends TextFileView implements KeyTarget, HoverParent {
 		this.loaded = true;
 		this.render();
 		this.renderer?.centerOn(root);
+		const line = this.pendingLine;
+		this.pendingLine = null;
+		if (line !== null) this.revealLine(line);
+		if (this.syncOnLoad) {
+			this.syncOnLoad = false;
+			this.syncOnce('markdown');
+		}
 		if (this.app.workspace.getActiveViewOfType(MapView) === (this as MapView)) this.focusMap();
 		const file = this.file;
 		if (file) void this.checkRecovery(file, data);
+	}
+
+	/** Spec 5.10: select the node on 0-based file line `line` and centre it (double click in an embedded map). */
+	revealLine(line: number): void {
+		if (!this.loaded) {
+			this.pendingLine = line;
+			return;
+		}
+		const id = nodeAtLine(this.session.doc, line)?.id;
+		if (!id) return;
+		this.select([id], id, false);
+		this.renderer?.centerOn(id);
 	}
 
 	/** The file's text changed on disk (sync, another program, a Markdown view that saved). */
@@ -533,6 +591,26 @@ export class MapView extends TextFileView implements KeyTarget, HoverParent {
 		this.select([id], id);
 	}
 
+	/**
+	 * Spec 5.6 "一键分屏同步": sync once right after the split opened. `from`
+	 * is the side the user pressed the button on: the map's own selection
+	 * leads when it has one (else the cursor line picks the node); a map that
+	 * was just opened takes the cursor line of the Markdown it was split from.
+	 */
+	syncOnce(from: 'map' | 'markdown'): void {
+		if (!this.loaded) {
+			this.syncOnLoad = true;
+			return;
+		}
+		if (!this.canEdit() || !this.plugin.settings.syncSelection) return;
+		const md = this.markdownView();
+		if (from === 'map' && this.session.view.selection.primary !== null) {
+			this.syncToText(true);
+			return;
+		}
+		if (md) this.applyCursorLine(md.view.editor.getCursor().line);
+	}
+
 	private afterEditorFlush(): void {
 		const md = this.markdownView();
 		const { line, reveal } = this.sync.afterFlush(md?.cm?.hasFocus ?? false);
@@ -643,14 +721,11 @@ export class MapView extends TextFileView implements KeyTarget, HoverParent {
 				focusId: v.focus,
 				selection: v.selection.ids,
 				primary: v.selection.primary,
-				direction: s.layoutDirect,
-				palette: s.strokeArray && s.strokeArray.length > 0 ? s.strokeArray : DEFAULT_PALETTE,
-				fontSize: s.fontSize,
-				nodeMaxWidth: s.nodeMaxWidth,
-				nodeGlowSize: s.nodeGlowSize,
-				placeholder: t('Placeholder'),
+				...settingsLook(s),
 				searchMatches: this.search?.matches,
 				searchCurrent: this.search?.current ?? null,
+				taskProgress: s.showTaskProgress ? this.taskCounts(doc.root) : undefined,
+				mapCards: this.cardLabels(),
 			},
 			{ anchorId },
 		);
@@ -666,14 +741,30 @@ export class MapView extends TextFileView implements KeyTarget, HoverParent {
 		}
 		this.updateToolbar();
 		this.mobileBar?.update();
+		this.multiBar?.update();
 		this.syncToText();
 	}
 
+	/** Counted over the whole tree, collapsed branches included, once per parse (one pass). */
+	private taskCounts(root: MapNode): ReadonlyMap<string, TaskCount> {
+		if (this.progress?.root !== root) this.progress = { root, counts: taskProgress(root) };
+		return this.progress.counts;
+	}
+
+	/** Labels of the map cards in the nodes (spec 5.10), once per parse and per change of the cards. */
+	cardLabels(): ReadonlyMap<string, string> {
+		const root = this.session.doc.root;
+		const path = this.file?.path ?? '';
+		const version = this.plugin.cards.version;
+		const c = this.cards;
+		if (c?.root === root && c.version === version && c.path === path) return c.labels;
+		const labels = this.plugin.cards.labels(root, path);
+		this.cards = { root, version, path, labels };
+		return labels;
+	}
+
 	private renderHost(): RenderHost {
-		return {
-			renderMarkdown: (text, el) => MarkdownRenderer.render(this.app, text, el, this.file?.path ?? '', this),
-			reducedMotion: () => this.win.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false,
-		};
+		return markdownHost(this.app, () => this.file?.path ?? '', this, this.contentEl);
 	}
 
 	private renderEvents(): RenderEvents {
@@ -685,6 +776,14 @@ export class MapView extends TextFileView implements KeyTarget, HoverParent {
 				if (next.has(id)) next.delete(id);
 				else next.add(id);
 				this.setCollapsed(next);
+			},
+			taskToggle: (id) => {
+				this.hideMenu();
+				if (!this.canEdit()) return;
+				this.commitEdit();
+				const node = indexNodes(this.session.doc.root).get(id)?.node;
+				// one character in the brackets; the selection stays as it is (spec 5.9)
+				if (node) this.runSteps(toggleTaskSteps([node]), { reveal: false, select: keepSelection(this.session) });
 			},
 			nodeDoubleClick: (id) => {
 				this.select([id], id, false);
@@ -705,12 +804,14 @@ export class MapView extends TextFileView implements KeyTarget, HoverParent {
 				this.select(all, all[all.length - 1] ?? null, false);
 			},
 			drop: (ids, targetId, place, copy) => this.onDrop(ids, targetId, place, copy),
-			contextMenu: (id) => this.showMenu(id),
+			contextMenu: (id, at) => this.onContextMenu(id, at),
 			editInput: () => this.updateSuggest(),
 			pasteFiles: (id, files) => void addImageFiles(this, id, files, true),
 			linkClick: (href, evt) => this.plugin.openLink(href, this.file?.path ?? '', evt),
+			cardClick: (link, evt) => void this.plugin.cards.open(link, this.file?.path ?? '', evt, this.contentEl),
 			linkHover: (href, el, evt) => this.hoverLink(href, el, evt),
-			viewportChange: () => {},
+			viewportChange: () => this.multiBar?.follow(),
+			layoutChange: () => this.multiBar?.update(),
 		};
 	}
 
@@ -804,6 +905,8 @@ export class MapView extends TextFileView implements KeyTarget, HoverParent {
 		const sel = this.session.view.selection.ids;
 		if (!sel.includes(id)) this.select([id], id, false);
 		this.menuFor = id;
+		this.multiBar?.hideMenu();
+		this.multiBar?.update();
 		const nodeEl = this.renderer?.nodeElement(id);
 		const box = this.contentEl.getBoundingClientRect();
 		const rect = nodeEl?.getBoundingClientRect();
@@ -818,8 +921,33 @@ export class MapView extends TextFileView implements KeyTarget, HoverParent {
 	}
 
 	private hideMenu(): void {
+		const was = this.menuFor !== null;
 		this.menuFor = null;
 		this.menuEl?.hide();
+		this.multiBar?.hideMenu();
+		if (was) this.multiBar?.update();
+	}
+
+	/** Whether the node menu or the multi-selection menu is open. */
+	isMenuOpen(): boolean {
+		return this.menuFor !== null || this.multiBar?.isMenuOpen === true;
+	}
+
+	/** Right click or long press (spec 4.1): on a node of a multi-selection the multi-selection actions (5.11), else the node menu. */
+	private onContextMenu(id: string, at: Point): void {
+		const sel = this.session.view.selection.ids;
+		if (!this.canEdit() || !this.multiBar || !sel.includes(id) || !isMultiSelection(sel)) {
+			this.showMenu(id);
+			return;
+		}
+		this.commitEdit();
+		this.hideMenu();
+		this.multiBar.showMenu(at);
+	}
+
+	/** A short message (Obsidian's notice) in the interface language. */
+	notify(key: StringKey, ...args: (string | number)[]): void {
+		new Notice(t(key, ...args));
 	}
 
 	// ------------------------------------------------------------ selection
@@ -853,6 +981,8 @@ export class MapView extends TextFileView implements KeyTarget, HoverParent {
 		if (!this.loaded || this.unsupported || this.editing) return;
 		this.win.requestAnimationFrame(() => {
 			if (this.editing || this.contentEl.contains(this.contentEl.ownerDocument.activeElement)) return;
+			// The tab lost activation meanwhile (split-sync gives focus back to the Markdown): do not steal it.
+			if (this.app.workspace.getActiveViewOfType(MapView) !== (this as MapView)) return;
 			const id = this.session.view.selection.primary ?? this.session.doc.root.id;
 			if (this.renderer?.nodeElement(id)) this.renderer.focusNode(id);
 			else this.contentEl.focus({ preventScroll: true });
@@ -1000,6 +1130,7 @@ export class MapView extends TextFileView implements KeyTarget, HoverParent {
 			container: this.contentEl,
 			tree: () => this.session.doc.root,
 			rootText: () => (this.session.doc.virtualRoot ? this.session.rootName : undefined),
+			cards: () => this.cardLabels(),
 			view: () => this.session.view,
 			setView: (view) => this.session.setView(view),
 			render: () => this.render(),
@@ -1018,7 +1149,7 @@ export class MapView extends TextFileView implements KeyTarget, HoverParent {
 			this.cancelEdit();
 			return;
 		}
-		if (this.menuFor !== null) {
+		if (this.isMenuOpen()) {
 			this.hideMenu();
 			return;
 		}
@@ -1088,6 +1219,7 @@ export class MapView extends TextFileView implements KeyTarget, HoverParent {
 			const handle = this.renderer.startEditing(id, text, caret);
 			this.editing = { id, handle, original: text };
 			this.mobileBar?.update();
+			this.multiBar?.update();
 		} catch {
 			this.editing = null;
 		}

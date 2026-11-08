@@ -4,7 +4,10 @@
 // Obsidian here; the exporter (exporter.ts) supplies measuring, images and theme.
 
 import type { LayoutEdge, NodePlacement } from "../core/layout.ts";
+import { findEmbeds } from "../core/mapCard.ts";
 import type { NodeKind } from "../core/types.ts";
+import { MAP_GLYPH } from "../glyph.ts";
+import { CARD_GAP_EM, CARD_ICON_EM, CARD_PAD_EM } from "../view/measure.ts";
 
 // ---------------------------------------------------------------- text model
 
@@ -19,6 +22,36 @@ export interface RunStyle {
 	math?: boolean;
 	/** Secondary text: an image that could not be loaded, or a non-image embed. */
 	faint?: boolean;
+	/** Text of a done task (spec 5.9): the theme's done colour. */
+	done?: boolean;
+	/** A map card (spec 5.10): the text is its label, drawn after the map icon on a link-coloured chip. Never breaks. */
+	card?: boolean;
+}
+
+/** Around a card's label in node text handed to parseBlocks (see `markCards`). */
+export const CARD_OPEN = "\ue100";
+export const CARD_CLOSE = "\ue101";
+
+/**
+ * Node text for the image export: every map embed with a label (spec 5.10)
+ * becomes its label between CARD_OPEN and CARD_CLOSE, read as a card run.
+ */
+export function markCards(text: string, labels: ReadonlyMap<string, string> | null): string {
+	if (!labels || labels.size === 0) return text;
+	let out = "";
+	let last = 0;
+	for (const e of findEmbeds(text)) {
+		const label = labels.get(e.raw);
+		if (label === undefined) continue;
+		out += text.slice(last, e.start) + CARD_OPEN + label.replace(/[\ue100\ue101]/g, "") + CARD_CLOSE;
+		last = e.end;
+	}
+	return last === 0 ? text : out + text.slice(last);
+}
+
+/** What a card adds to its label's width in the export: padding, icon and gap (no arrow). */
+export function cardExtra(fontPx: number): number {
+	return (2 * CARD_PAD_EM + CARD_ICON_EM + CARD_GAP_EM) * fontPx;
 }
 
 export interface Run {
@@ -34,6 +67,8 @@ export type Block =
 	| { type: "table"; rows: string[][] };
 
 function sameStyle(a: RunStyle, b: RunStyle): boolean {
+	// two cards side by side stay two cards
+	if (a.card || b.card) return false;
 	const keys: (keyof RunStyle)[] = ["bold", "italic", "code", "strike", "highlight", "link", "math", "faint"];
 	return keys.every((k) => Boolean(a[k]) === Boolean(b[k]));
 }
@@ -133,6 +168,14 @@ export function parseInline(text: string, base: RunStyle = {}): Run[] {
 				continue;
 			}
 		}
+		if (ch === CARD_OPEN) {
+			const end = text.indexOf(CARD_CLOSE, i + 1);
+			if (end > 0) {
+				add([{ text: text.slice(i + 1, end), style: { ...base, card: true } }]);
+				i = end + 1;
+				continue;
+			}
+		}
 		if (ch === "$") {
 			const m = /^\$\$([\s\S]+?)\$\$/.exec(rest) ?? /^\$(?=\S)([^$\n]*?\S)\$(?!\d)/.exec(rest);
 			if (m) {
@@ -197,6 +240,11 @@ export function parseInline(text: string, base: RunStyle = {}): Run[] {
 	return out;
 }
 
+/** A done task's text: struck through in the done colour, like Obsidian's done tasks (spec 5.9). */
+export function markTaskDone(blocks: readonly Block[]): Block[] {
+	return blocks.map((b) => (b.type === "text" ? { type: "text", runs: b.runs.map((r) => ({ text: r.text, style: { ...r.style, strike: true, done: true } })) } : b));
+}
+
 /** Plain text of inline Markdown (table cells). */
 export function plainInline(text: string): string {
 	return parseInline(text).map((r) => r.text).join("");
@@ -227,6 +275,16 @@ function imageBlock(match: RegExpExecArray): Block {
 	return { type: "image", src, alt, wiki: false, width: spec?.width ?? null, height: spec?.height ?? null };
 }
 
+/** A quote's text without its markers; a callout's `[!type]+ Title` line becomes the title (or the type). */
+function quoteBody(text: string): string {
+	const lines = text.split("\n").map((l) => l.replace(/^\s{0,3}(?:>\s?)+/, ""));
+	if (lines.length > 0 && text.trimStart().startsWith(">")) {
+		const m = /^\[!([^\]\s]+)\][+-]?[ \t]*(.*)$/.exec(lines[0]);
+		if (m) lines[0] = m[2].trim() !== "" ? m[2].trim() : m[1].charAt(0).toUpperCase() + m[1].slice(1).toLowerCase();
+	}
+	return lines.join("\n");
+}
+
 /** Node text to blocks: text with embedded images split out; code and tables by kind. */
 export function parseBlocks(text: string, kind: NodeKind): Block[] {
 	if (kind === "code") {
@@ -243,7 +301,7 @@ export function parseBlocks(text: string, kind: NodeKind): Block[] {
 		return [{ type: "table", rows }];
 	}
 	// a quoted paragraph shows its text without the markers
-	const body = text.split("\n").map((l) => l.replace(/^\s{0,3}(?:>\s?)+/, "")).join("\n");
+	const body = quoteBody(text);
 	const blocks: Block[] = [];
 	let last = 0;
 	IMAGE.lastIndex = 0;
@@ -360,7 +418,7 @@ export function wrapRuns(runs: readonly Run[], maxWidth: number, measure: Measur
 	};
 	for (const run of runs) {
 		// a formula shown as source never breaks inside unless it cannot fit
-		const tokens = run.style.math ? run.text.split(/(\n)/).filter((x) => x !== "") : run.text.match(TOKEN) ?? [];
+		const tokens = run.style.math || run.style.card ? run.text.split(/(\n)/).filter((x) => x !== "") : run.text.match(TOKEN) ?? [];
 		for (const tok of tokens) {
 			if (tok === "\n") {
 				newLine();
@@ -375,8 +433,9 @@ export function wrapRuns(runs: readonly Run[], maxWidth: number, measure: Measur
 			}
 			if (line.width + space.width + w <= max) {
 				place(tok, run.style, w);
-			} else if (w <= max) {
-				newLine();
+			} else if (w <= max || run.style.card) {
+				// a card wider than the node stays whole, on a line of its own
+				if (w <= max || line.segments.length > 0) newLine();
 				place(tok, run.style, w);
 			} else {
 				// too long for any line: break between characters
@@ -462,6 +521,11 @@ export interface ExportTheme {
 	monoFamily: string;
 	radius: number;
 	rootRadius: number;
+	/** Done task text (`--checklist-done-color`); falls back to `faint`. */
+	taskDone?: string;
+	/** Progress label (`--text-muted`), and its colour when all tasks are done (`--text-success`); fall back to `faint` and `accent`. */
+	muted?: string;
+	success?: string;
 }
 
 /** Something drawn inside a node, relative to the node's content box. */
@@ -486,6 +550,10 @@ export interface SceneNode {
 	padX?: number;
 	padY?: number;
 	radius?: number;
+	/** A task's checkbox (spec 5.9): `size` px, the text starts `lead` px further right, `cy` is the first line's middle (content box). */
+	task?: { done: boolean; size: number; lead: number; cy: number } | null;
+	/** "done/total", right-aligned in the content box on the first line, at `fontPx`. */
+	progress?: { label: string; complete: boolean; fontPx: number; cy: number } | null;
 }
 
 export interface Scene {
@@ -519,11 +587,13 @@ function xmlText(s: string): string {
 
 function segmentSvg(seg: Segment, baseX: number, node: SceneNode, theme: ExportTheme): string {
 	const s = seg.style;
-	const attrs: string[] = [`x="${r2(baseX + seg.x)}"`];
+	const lead = s.card ? cardExtra(node.fontPx) - CARD_PAD_EM * node.fontPx : 0;
+	const attrs: string[] = [`x="${r2(baseX + seg.x + lead)}"`];
 	if (s.bold && node.weight < 700) attrs.push('font-weight="700"');
 	if (s.italic) attrs.push('font-style="italic"');
 	if (s.code) attrs.push(`font-family="${escapeXml(theme.monoFamily)}"`, `fill="${escapeXml(theme.codeText)}"`);
-	else if (s.link) attrs.push(`fill="${escapeXml(theme.link)}"`);
+	else if (s.link || s.card) attrs.push(`fill="${escapeXml(theme.link)}"`);
+	else if (s.done) attrs.push(`fill="${escapeXml(theme.taskDone ?? theme.faint)}"`);
 	else if (s.faint || s.math) attrs.push(`fill="${escapeXml(theme.faint)}"`);
 	const deco = [s.link ? "underline" : "", s.strike ? "line-through" : ""].filter(Boolean).join(" ");
 	if (deco) attrs.push(`text-decoration="${deco}"`);
@@ -545,6 +615,10 @@ function contentSvg(item: ContentItem, ox: number, oy: number, node: SceneNode, 
 			const cy = oy + item.y + item.height / 2;
 			const back: string[] = [];
 			for (const seg of item.segments) {
+				if (seg.style.card) {
+					back.push(cardSvg(ox + seg.x, oy + item.y, seg.width, item.height, node.fontPx, theme));
+					continue;
+				}
 				const fill = seg.style.code ? theme.codeFill : seg.style.highlight ? theme.highlight : null;
 				if (!fill) continue;
 				back.push(`<rect x="${r2(ox + seg.x - 1)}" y="${r2(oy + item.y + 1)}" width="${r2(seg.width + 2)}" height="${r2(item.height - 2)}" rx="2" fill="${escapeXml(fill)}"/>`);
@@ -593,7 +667,17 @@ function nodeSvg(node: SceneNode, scene: Scene, m: ContentMetrics, index: number
 	const oy = p.y + m.border + (node.padY ?? m.padY);
 	const weight = node.weight;
 	out.push(`<g font-size="${node.fontPx}" font-weight="${weight}" fill="${escapeXml(t.text)}">`);
-	for (const item of node.content) out.push(contentSvg(item, ox, oy, node, t));
+	const task = node.task;
+	for (const item of node.content) out.push(contentSvg(item, ox + (task?.lead ?? 0), oy, node, t));
+	if (task) out.push(checkboxSvg(ox, oy + task.cy - task.size / 2, task.size, task.done, t));
+	const pr = node.progress;
+	if (pr) {
+		const color = pr.complete ? (t.success ?? t.accent) : (t.muted ?? t.faint);
+		const x = p.x + p.width - m.border - (node.padX ?? m.padX);
+		out.push(
+			`<text x="${r2(x)}" y="${r2(oy + pr.cy)}" text-anchor="end" dominant-baseline="central" font-size="${r2(pr.fontPx)}" font-weight="400" fill="${escapeXml(color)}">${xmlText(pr.label)}</text>`,
+		);
+	}
 	out.push("</g>");
 	if (node.collapsedCount > 0) {
 		const label = String(node.collapsedCount);
@@ -612,6 +696,29 @@ function nodeSvg(node: SceneNode, scene: Scene, m: ContentMetrics, index: number
 	return out.join("");
 }
 
+/** A map card's chip and icon (spec 5.10); the label is drawn as a text span over it. */
+function cardSvg(x: number, y: number, width: number, height: number, px: number, t: ExportTheme): string {
+	const icon = CARD_ICON_EM * px;
+	const link = escapeXml(t.link);
+	return (
+		`<rect x="${r2(x)}" y="${r2(y + 1)}" width="${r2(width)}" height="${r2(height - 2)}" rx="${r2(px * 0.25)}" fill="${link}" fill-opacity="0.12"/>` +
+		`<g transform="translate(${r2(x + CARD_PAD_EM * px)} ${r2(y + (height - icon) / 2)}) scale(${r2(icon / 24)})" color="${link}" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${MAP_GLYPH}</g>`
+	);
+}
+
+/** A task checkbox: an outlined rounded square; done ones are filled with a check mark. */
+function checkboxSvg(x: number, y: number, size: number, done: boolean, t: ExportTheme): string {
+	const r = r2(size * 0.2);
+	if (!done) {
+		return `<rect class="mapdown-task-box" x="${r2(x + 0.5)}" y="${r2(y + 0.5)}" width="${r2(size - 1)}" height="${r2(size - 1)}" rx="${r}" fill="${escapeXml(t.nodeFill)}" stroke="${escapeXml(t.faint)}" stroke-width="1"/>`;
+	}
+	const pt = (fx: number, fy: number): string => `${r2(x + fx * size)} ${r2(y + fy * size)}`;
+	return (
+		`<rect class="mapdown-task-box" x="${r2(x)}" y="${r2(y)}" width="${r2(size)}" height="${r2(size)}" rx="${r}" fill="${escapeXml(t.accent)}"/>` +
+		`<path class="mapdown-task-check" d="M ${pt(0.25, 0.52)} L ${pt(0.43, 0.7)} L ${pt(0.76, 0.32)}" fill="none" stroke="${escapeXml(t.badgeText)}" stroke-width="${r2(Math.max(1.5, size * 0.12))}" stroke-linecap="round" stroke-linejoin="round"/>`
+	);
+}
+
 /**
  * The scene as a standalone SVG document. `pixelScale` sets the intrinsic
  * width and height (the canvas draws it at that size, so text stays sharp).
@@ -627,7 +734,7 @@ export function buildSvg(scene: Scene, metrics: ContentMetrics, pixelScale = 1):
 	];
 	for (const e of scene.edges) {
 		const d = `M ${r2(e.from.x)} ${r2(e.from.y)} C ${r2(e.c1.x)} ${r2(e.c1.y)}, ${r2(e.c2.x)} ${r2(e.c2.y)}, ${r2(e.to.x)} ${r2(e.to.y)}`;
-		const width = e.parentId === scene.rootId ? 2.5 : 1.5;
+		const width = e.parentId === scene.rootId ? 2 : 1.2;
 		out.push(`<path d="${d}" stroke="${escapeXml(e.color)}" stroke-width="${width}"/>`);
 	}
 	out.push("</g>");
@@ -692,9 +799,11 @@ export function layoutContent(input: ContentInput): ContentResult {
 	let y = 0;
 	let missing = 0;
 	let formulas = 0;
+	// a card is its label plus padding, icon and gap
+	const measure: Measure = (s, st) => input.measure(s, st) + (st.card ? cardExtra(input.fontPx) : 0);
 	const pushLines = (runs: Run[]): void => {
 		formulas += runs.filter((r) => r.style.math).length;
-		for (const line of wrapRuns(runs, input.innerWidth, input.measure)) {
+		for (const line of wrapRuns(runs, input.innerWidth, measure)) {
 			items.push({ type: "line", y, height: lh, segments: line.segments });
 			y += lh;
 		}

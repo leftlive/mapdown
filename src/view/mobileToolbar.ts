@@ -3,7 +3,9 @@
 // shortcuts). Every button runs an existing command (development plan 3.5).
 // The bar sits at the bottom of the view and hides while a node is being
 // edited, which is exactly when the soft keyboard is up (plan 3.7); the
-// keyboard inset is also tracked so the bar never lies under it.
+// keyboard inset is also tracked so the bar never lies under it. With two or
+// more nodes selected the bar shows the multi-selection actions (spec 5.11)
+// instead, followed by undo and redo.
 
 import { setIcon } from "obsidian";
 import { available, COMMAND_BY_ID } from "../commands.ts";
@@ -11,11 +13,19 @@ import { t } from "../i18n.ts";
 import { DOM } from "./contract.ts";
 import type { MapView } from "./MapView.ts";
 import { keyboardInset, MOBILE_ACTIONS } from "./mobileActions.ts";
+import { addMultiButtons } from "./multiActionBar.ts";
+import { isMultiSelection } from "./multiActions.ts";
+
+/** Kept in both sets: the history buttons. */
+const ALWAYS = new Set(["undo", "redo"]);
 
 export class MobileToolbar {
 	private readonly el: HTMLElement;
 	private readonly abort = new AbortController();
 	private readonly buttons = new Map<string, HTMLButtonElement>();
+	/** The multi-selection set; shown instead of the others (except undo and redo). */
+	private multi = new Map<string, HTMLButtonElement>();
+	private multiShown: boolean | null = null;
 	private readonly parent: HTMLElement;
 	private readonly view: MapView;
 
@@ -27,6 +37,7 @@ export class MobileToolbar {
 		parent.addClass("has-mobile-toolbar");
 		for (const a of MOBILE_ACTIONS) {
 			if (!COMMAND_BY_ID.has(a.command)) continue;
+			if (a.action === "undo" && this.multi.size === 0) this.multi = this.addMulti();
 			const b = this.el.createEl("button", { cls: "clickable-icon", attr: { [DOM.actionAttr]: a.action, "aria-label": t(a.label) } });
 			setIcon(b, a.icon);
 			// keep the focus (and the soft keyboard) where it is
@@ -37,6 +48,7 @@ export class MobileToolbar {
 			}, { signal: this.abort.signal });
 			this.buttons.set(a.action, b);
 		}
+		if (this.multi.size === 0) this.multi = this.addMulti();
 		const vv = parent.win.visualViewport;
 		if (vv) {
 			const onResize = (): void => this.trackKeyboard();
@@ -51,6 +63,12 @@ export class MobileToolbar {
 		if (show) this.el.show();
 		else this.el.hide();
 		if (!show) return;
+		const multi = isMultiSelection(this.view.session.view.selection.ids);
+		if (multi !== this.multiShown) {
+			this.multiShown = multi;
+			for (const [action, b] of this.buttons) b.toggle(!multi || ALWAYS.has(action));
+			for (const b of this.multi.values()) b.toggle(multi);
+		}
 		for (const a of MOBILE_ACTIONS) {
 			const b = this.buttons.get(a.action);
 			const cmd = COMMAND_BY_ID.get(a.command);
@@ -60,6 +78,15 @@ export class MobileToolbar {
 			b.toggleClass("is-disabled", !ok);
 		}
 		this.trackKeyboard();
+	}
+
+	private addMulti(): Map<string, HTMLButtonElement> {
+		const set = addMultiButtons(this.el, this.view, this.abort.signal);
+		for (const b of set.values()) {
+			b.addClass("is-multi");
+			b.hide();
+		}
+		return set;
 	}
 
 	private enabledFor(action: string): boolean {

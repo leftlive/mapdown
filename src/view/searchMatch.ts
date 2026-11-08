@@ -3,6 +3,8 @@
 // No DOM; the bar itself is src/view/search.ts.
 
 import { hidingAncestors, setTempExpanded, type ViewState } from '../core/state.ts';
+import { cardShownText } from '../core/mapCard.ts';
+import { taskDisplayText } from '../core/tasks.ts';
 import type { MapNode } from '../core/types.ts';
 
 /** Lower case, inline markup and link brackets dropped, whitespace (and line breaks) collapsed. */
@@ -20,6 +22,8 @@ export interface MatchOptions {
 	rootText?: string;
 	/** Search only this subtree (focus mode); unknown ids search the whole tree. */
 	scopeId?: string | null;
+	/** Map card labels (spec 5.10): a map embed is matched by the name its card shows, not by `![[…]]`. */
+	cards?: ReadonlyMap<string, string>;
 }
 
 function findNode(tree: MapNode, id: string): MapNode | null {
@@ -33,8 +37,8 @@ function findNode(tree: MapNode, id: string): MapNode | null {
 }
 
 /**
- * Ids of the nodes whose text contains `query`, in document order. Nodes
- * inside collapsed branches count too (navigating to them opens the branch).
+ * Ids of the nodes whose shown text contains `query`, in document order.
+ * Nodes inside collapsed branches count too (navigating to them opens the branch).
  */
 export function findMatches(tree: MapNode, query: string, opts: MatchOptions = {}): string[] {
 	const q = normalizeSearchText(query);
@@ -44,7 +48,9 @@ export function findMatches(tree: MapNode, query: string, opts: MatchOptions = {
 	const stack = [start];
 	while (stack.length > 0) {
 		const node = stack.pop() as MapNode;
-		const text = node === tree && opts.rootText !== undefined ? opts.rootText : node.text;
+		// a task's `[ ]` / `[x]` is drawn as a checkbox, so it is not searched (spec 5.9)
+		const own = node === tree && opts.rootText !== undefined ? opts.rootText : taskDisplayText(node.text, node.kind);
+		const text = opts.cards && opts.cards.size > 0 ? cardShownText(own, opts.cards) : own;
 		if (normalizeSearchText(text).includes(q)) out.push(node.id);
 		for (let i = node.children.length - 1; i >= 0; i--) stack.push(node.children[i]);
 	}

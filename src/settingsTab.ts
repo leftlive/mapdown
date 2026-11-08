@@ -105,6 +105,7 @@ export class MapdownSettingTab extends PluginSettingTab {
 						render: (setting) => this.renderPalette(setting),
 					},
 					slider('nodeGlowSize', 0, 24, 1),
+					this.row('showTaskProgress', { type: 'toggle' }),
 				],
 			},
 			{
@@ -133,6 +134,11 @@ export class MapdownSettingTab extends PluginSettingTab {
 					this.row('linkOpenMode', { type: 'dropdown', options: labelled('link', LINK_MODE_VALUES) }),
 					this.row('syncSelection', { type: 'toggle' }),
 				],
+			},
+			{
+				type: 'group',
+				heading: t('set-group-embed'),
+				items: [this.row('embedMaps', { type: 'toggle' }), slider('embedHeight', 150, 1200, 50)],
 			},
 		];
 	}

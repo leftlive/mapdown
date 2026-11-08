@@ -7,8 +7,10 @@
 // lay out, then write positions. Maps with more than VIRTUALIZE_THRESHOLD
 // visible nodes only get DOM near the viewport; the rest use estimates.
 
-import { Platform } from "obsidian";
+import { Platform, setIcon } from "obsidian";
 import type { MapNode, Point, Size } from "../core/types.ts";
+import { taskOf } from "../core/tasks.ts";
+import { CARD_MARK, CARD_MARKS, cardSlots, type CardSlot } from "../core/mapCard.ts";
 import { branchLook, createLayouter, type LayoutInput, type LayoutResult, type NodePlacement } from "../core/layout.ts";
 import {
 	DOM,
@@ -28,12 +30,17 @@ import {
 	MeasureGate,
 	SizeCache,
 	boxSize,
+	decorKey,
+	decorWidths,
 	domSize,
 	estimateSize,
 	fontFor,
 	isPlainText,
 	markdownSource,
+	progressFont,
 	sizeKey,
+	withCardMarks,
+	type NodeDecor,
 	type NodeFont,
 } from "./measure.ts";
 import { Minimap, shouldShowMinimap } from "./minimap.ts";
@@ -86,12 +93,19 @@ const CLS = {
 	content: "mapdown-node-content",
 	badge: "mapdown-node-badge",
 	toggle: "mapdown-node-toggle",
+	taskText: "mapdown-task-text",
+	taskDecor: "has-task-decor",
+	taskInput: "task-list-item-checkbox",
+	complete: "is-complete",
 	root: "is-root",
 	level1: "is-level-1",
 	level2: "is-level-2",
 	deep: "is-level-deep",
 	empty: "is-empty",
 	rich: "is-rich",
+	cardIcon: "mapdown-map-card-icon",
+	cardName: "mapdown-map-card-name",
+	cardArrow: "mapdown-map-card-arrow",
 	left: "is-left",
 	entering: "is-entering",
 	animating: "is-animating",
@@ -118,7 +132,22 @@ interface Item {
 	parent: string | null;
 	plain: boolean;
 	font: NodeFont;
+	/** Size-cache key: content, decor, font and max width. */
 	key: string;
+	/** Text drawn in the node: a task without its marker, the placeholder for an empty node. */
+	shown: string;
+	/** Map cards in the text (spec 5.10), in order; null when there are none. */
+	cards: CardSlot[] | null;
+	/** `shown` with each card replaced by its mark (core/mapCard.ts); `shown` when there are no cards. */
+	drawn: string;
+	/** Checkbox and progress label beside the text (spec 5.9); null for a node with neither. */
+	decor: NodeDecor | null;
+	/** The task's bracket character; null when the node is no task. */
+	taskChar: string | null;
+	/** What the decor looks like (done or open, all done, read-only); a change rewrites it, not the size. */
+	decorSig: string;
+	/** Every task below is done (the label takes the "complete" colour). */
+	complete: boolean;
 	/** Has children that are hidden. */
 	collapsed: boolean;
 	/** Visible children, in order. */
@@ -130,6 +159,15 @@ interface NodeView {
 	id: string;
 	el: HTMLElement;
 	content: HTMLElement;
+	/** Where the text goes: the content itself, or a span beside the checkbox and progress label. */
+	text: HTMLElement;
+	/** The checkbox's click target and the theme-styled input inside it. */
+	check: HTMLElement | null;
+	checkInput: HTMLInputElement | null;
+	progress: HTMLElement | null;
+	/** Text currently written into `text`; null forces a rewrite. */
+	textKey: string | null;
+	decorSig: string | null;
 	badge: HTMLElement | null;
 	/** Collapse dot on the outer side (expanded nodes with children). */
 	toggle: HTMLElement | null;
@@ -248,6 +286,10 @@ class Renderer implements MapRenderer {
 	private baseDepth = 0;
 	/** Pointer that went down on a collapse handle; the click that follows toggles. */
 	private toggleDown: number | null = null;
+	/** Pointer that went down on a task checkbox; its click toggles the task. */
+	private taskDown: number | null = null;
+	/** A map card was pressed (spec 5.10); its click opens the map. */
+	private cardDown: number | null = null;
 	/** Focus mode on a non-root node: the side and colour its branch has in the whole map. */
 	private focusLook: { side: "left" | "right"; color: string } | null = null;
 	private lay: LayoutResult | null = null;
@@ -328,6 +370,10 @@ class Renderer implements MapRenderer {
 		}, opts);
 		this.win.addEventListener("blur", () => this.gestures.abort(), opts);
 		el.addEventListener("wheel", (e) => this.onWheel(e), { signal: this.abort.signal, passive: false });
+		// read-only: one finger scrolls the page (touch-action), two fingers are ours
+		el.addEventListener("touchmove", (e) => {
+			if (this.model?.readOnly && e.touches.length > 1) e.preventDefault();
+		}, { signal: this.abort.signal, passive: false });
 		el.addEventListener("contextmenu", (e) => this.onContextMenu(e), opts);
 		el.addEventListener("click", (e) => this.onNativeClick(e), opts);
 		el.addEventListener("mouseover", (e) => this.onLinkHover(e), opts);
@@ -348,7 +394,7 @@ class Renderer implements MapRenderer {
 				this.width = entry.contentRect.width;
 				this.height = entry.contentRect.height;
 			}
-			if (!this.centered && !this.userMoved && this.width > 0 && this.lay) this.centerOn(null);
+			if (!this.centered && !this.userMoved && this.width > 0 && this.lay) this.place();
 			else if (oldW > 0 && oldH > 0 && this.width > 0 && this.height > 0) {
 				// Keep the point at the middle of the view in the middle when the pane resizes (split, sidebar).
 				const dx = (this.width - oldW) / 2;
@@ -387,6 +433,7 @@ class Renderer implements MapRenderer {
 			this.model.nodeMaxWidth !== model.nodeMaxWidth ||
 			this.model.nodeGlowSize !== model.nodeGlowSize;
 		this.model = model;
+		this.gestures.readOnly = model.readOnly === true;
 		const flight = this.dropFlight;
 		this.dropFlight = null;
 		if (flight) this.startFlight(flight);
@@ -398,7 +445,17 @@ class Renderer implements MapRenderer {
 		this.buildItems(model);
 		if (this.edit && !this.items.has(this.edit.id)) this.stopEditing();
 		this.render({ anchorId, anchorBefore, animate: (opts?.animate ?? false) || flight !== null });
-		if (!this.centered && !this.userMoved && this.width > 0) this.centerOn(null);
+		if (!this.centered && !this.userMoved && this.width > 0) this.place();
+	}
+
+	/** First view: the root centred, or for a read-only map (embed, spec 5.10) the whole drawing fitted, never above 100%. */
+	private place(): void {
+		if (!this.model?.readOnly) {
+			this.centerOn(null);
+		} else if (this.lay) {
+			this.fit();
+			this.centered = true;
+		}
 	}
 
 	nodeElement(id: string): HTMLElement | null {
@@ -419,6 +476,10 @@ class Renderer implements MapRenderer {
 		const next = revealRect(this.vp, p, this.area(), REVEAL_PAD);
 		if (next !== this.vp) this.setViewport(next);
 		this.refreshWindowNow();
+	}
+
+	usableArea(): Rect {
+		return this.area();
 	}
 
 	get viewport(): Viewport {
@@ -598,8 +659,15 @@ class Renderer implements MapRenderer {
 		while (stack.length > 0) {
 			const { node, depth, parent } = stack.pop() as { node: MapNode; depth: number; parent: string | null };
 			const font = fontFor(baseDepth + depth, model.fontSize);
-			const shown = node.text === "" ? model.placeholder : node.text;
-			const plain = node.text === "" || isPlainText(node.text, node.kind);
+			// a task's `[ ]` is drawn as a checkbox; plain or rich is decided on the rest (spec 5.9)
+			const task = taskOf(node.text, node.kind);
+			const count = model.taskProgress?.get(node.id);
+			const decor: NodeDecor | null = task || count ? { task: task !== null, progress: count ? `${count.done}/${count.total}` : null } : null;
+			const own = task ? node.text.slice(task.length) : node.text;
+			const shown = node.text === "" ? model.placeholder : own;
+			// a map embed is drawn as a card, never rendered by Obsidian (spec 5.10)
+			const slots = model.mapCards && node.text !== "" && node.kind !== "code" ? cardSlots(own, model.mapCards) : null;
+			const plain = node.text === "" || (!slots && isPlainText(own, node.kind));
 			const hidden = model.hidden.has(node.id) && node.children.length > 0;
 			const item: Item = {
 				node,
@@ -607,10 +675,18 @@ class Renderer implements MapRenderer {
 				parent,
 				plain,
 				font,
-				key: contentKey(node, plain, shown, font, model.nodeMaxWidth),
+				key: "",
+				shown,
+				cards: slots?.cards ?? null,
+				drawn: slots?.text ?? shown,
+				decor,
+				taskChar: task ? task.char : null,
+				decorSig: decor ? `${task ? task.char : ""}|${count && count.done === count.total ? "c" : ""}|${model.readOnly ? "r" : ""}` : "",
+				complete: count !== undefined && count.done === count.total,
 				collapsed: hidden,
 				kids: [],
 			};
+			item.key = contentKey(node, plain, drawnKey(item), decor, font, model.nodeMaxWidth);
 			items.set(node.id, item);
 			order.push(node.id);
 			if (parent !== null) items.get(parent)?.kids.push(node.id);
@@ -655,18 +731,24 @@ class Renderer implements MapRenderer {
 		const model = this.model as RenderModel;
 		const font = fontFor(this.baseDepth + depth, model.fontSize);
 		if (font.level === item.font.level) return this.sizeOf(item);
-		const node = item.node;
-		const shown = node.text === "" ? model.placeholder : node.text;
-		const key = contentKey(node, item.plain, shown, font, model.nodeMaxWidth);
-		return this.sizes.get(key) ?? estimateSize(shown, font, model.nodeMaxWidth, this.measureFn(font));
+		const key = contentKey(item.node, item.plain, drawnKey(item), item.decor, font, model.nodeMaxWidth);
+		return this.sizes.get(key) ?? this.estimate(item, font);
+	}
+
+	/** Canvas estimate of a node at `font`, checkbox and progress label included. */
+	private estimate(item: Item, font: NodeFont): Size {
+		const decor = item.decor ? decorWidths(item.decor, font, this.measureFn(progressFont(font))) : undefined;
+		// measureFn(progressFont) switched the context's font; get the text measurer after it
+		const text = this.measureFn(font);
+		const measure = item.cards ? withCardMarks(text, item.cards.map((c) => c.label), font.px, CARD_MARK) : text;
+		return estimateSize(item.drawn, font, this.model?.nodeMaxWidth ?? 800, measure, decor);
 	}
 
 	private sizeOf(item: Item): Size {
 		if (this.edit?.id === item.node.id && this.edit.size) return this.edit.size;
 		const cached = this.sizes.get(item.key);
 		if (cached) return cached;
-		const shown = item.node.text === "" ? (this.model?.placeholder ?? "") : item.node.text;
-		const est = estimateSize(shown, item.font, this.model?.nodeMaxWidth ?? 800, this.measureFn(item.font));
+		const est = this.estimate(item, item.font);
 		this.sizes.setEstimate(item.key, est);
 		return est;
 	}
@@ -737,7 +819,7 @@ class Renderer implements MapRenderer {
 					view = this.ensureView(id);
 					created.add(id);
 				}
-				if (view.key !== item.key) this.writeContent(view, item);
+				if (view.key !== item.key || view.decorSig !== item.decorSig) this.writeContent(view, item);
 				if (view.ready && (!this.virtual || !item.plain) && !this.sizes.get(item.key)?.real && !this.isEditing(id)) {
 					measure.push(view);
 				}
@@ -779,6 +861,7 @@ class Renderer implements MapRenderer {
 		if (vp !== this.vp) this.setViewport(vp);
 		else this.applyTransform();
 		this.sizes.prune(Math.max(4 * this.order.length, 2000));
+		this.events.layoutChange?.();
 	}
 
 	private pinned(model: RenderModel): string[] {
@@ -805,6 +888,12 @@ class Renderer implements MapRenderer {
 			id,
 			el,
 			content,
+			text: content,
+			check: null,
+			checkInput: null,
+			progress: null,
+			textKey: null,
+			decorSig: null,
 			badge: null,
 			toggle: null,
 			key: null,
@@ -838,10 +927,7 @@ class Renderer implements MapRenderer {
 	}
 
 	private writeContent(view: NodeView, item: Item): void {
-		const model = this.model as RenderModel;
 		view.key = item.key;
-		view.token++;
-		const token = view.token;
 		if (view.fontPx !== item.font.px) {
 			view.el.style.setProperty("font-size", `${item.font.px}px`);
 			view.fontPx = item.font.px;
@@ -850,33 +936,126 @@ class Renderer implements MapRenderer {
 		view.el.toggleClass(CLS.level1, item.font.level === 1);
 		view.el.toggleClass(CLS.level2, item.font.level === 2);
 		view.el.toggleClass(CLS.deep, item.font.level >= 3);
+		this.writeDecor(view, item);
 		const text = item.node.text;
+		const textKey = (item.plain ? "p" : "r") + (text === "" ? "\u0000" : "") + drawnKey(item);
+		if (view.textKey === textKey) return;
+		view.textKey = textKey;
+		view.token++;
+		const token = view.token;
+		const cards = item.cards;
+		// cards in plain text are written directly, like plain text (no Markdown rendering)
+		const plain = item.plain || (cards !== null && isPlainText(item.drawn, item.node.kind));
 		view.content.toggleClass(CLS.empty, text === "");
-		view.content.toggleClass(CLS.rich, text !== "" && !item.plain);
-		if (view.rich && item.plain) this.richObserver.unobserve(view.content);
-		if (text === "" || item.plain) {
-			view.content.textContent = text === "" ? model.placeholder : text;
+		view.content.toggleClass(CLS.rich, text !== "" && !plain);
+		if (view.rich && plain) this.richObserver.unobserve(view.content);
+		const target = view.text;
+		if (cards) target.replaceChildren(...this.cardNodes(item.drawn, cards, target));
+		else target.textContent = item.shown;
+		if (text === "" || plain) {
 			view.rich = false;
 			view.ready = true;
 			return;
 		}
-		// rich: raw text until the Markdown is rendered
-		view.content.textContent = text;
+		// rich: raw text (cards drawn) until the Markdown is rendered
 		view.ready = false;
 		if (!view.rich) this.richObserver.observe(view.content);
 		view.rich = true;
 		const staging = this.doc.createElement("div"); // detached, same realm as the view
 		const done = (ok: boolean) => {
-			if (this.destroyed || view.token !== token || this.views.get(view.id) !== view) return;
-			if (ok) view.content.replaceChildren(...Array.from(staging.childNodes));
+			if (this.destroyed || view.token !== token || this.views.get(view.id) !== view || view.text !== target) return;
+			if (ok) {
+				if (cards) this.placeCards(staging, cards);
+				target.replaceChildren(...Array.from(staging.childNodes));
+			}
 			view.ready = true;
 			this.settleIds.add(view.id);
 			this.scheduleFrame();
 		};
-		this.host.renderMarkdown(markdownSource(text, item.node.kind), staging).then(
+		this.host.renderMarkdown(markdownSource(item.drawn, item.node.kind), staging).then(
 			() => done(true),
 			() => done(false),
 		);
+	}
+
+	/** `text` (with card marks) as text nodes and card elements; the cards are made inside `parent` (its document), to be moved. */
+	private cardNodes(text: string, cards: readonly CardSlot[], parent: HTMLElement): Node[] {
+		const out: Node[] = [];
+		let last = 0;
+		for (let i = 0; i < text.length; i++) {
+			const card = cards[text.charCodeAt(i) - CARD_MARK];
+			if (!card) continue;
+			if (i > last) out.push(this.doc.createTextNode(text.slice(last, i)));
+			out.push(this.cardElement(card, parent));
+			last = i + 1;
+		}
+		if (last < text.length) out.push(this.doc.createTextNode(text.slice(last)));
+		return out;
+	}
+
+	/** Rendered Markdown: the card marks left in its text become card elements. */
+	private placeCards(root: HTMLElement, cards: readonly CardSlot[]): void {
+		const walker = this.doc.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+		const hits: Text[] = [];
+		for (let n = walker.nextNode(); n !== null; n = walker.nextNode()) if (CARD_MARKS.test((n as Text).data)) hits.push(n as Text);
+		for (const t of hits) t.replaceWith(...this.cardNodes(t.data, cards, root));
+	}
+
+	/** A map card (spec 5.10): icon, label, "open" arrow; the link it opens in `DOM.mapCardLink`. */
+	private cardElement(card: CardSlot, parent: HTMLElement): HTMLElement {
+		const el = parent.createSpan({ cls: DOM.mapCard, attr: { [DOM.mapCardLink]: card.raw } });
+		setIcon(el.createSpan({ cls: CLS.cardIcon }), "mapdown");
+		el.createSpan({ cls: CLS.cardName, text: card.label });
+		setIcon(el.createSpan({ cls: CLS.cardArrow }), "arrow-up-right");
+		return el;
+	}
+
+	/**
+	 * Checkbox in front of the text and progress label after it (spec 5.9). A
+	 * node with either gets a row: [checkbox][text][label]; others keep their
+	 * text directly in the content element.
+	 */
+	private writeDecor(view: NodeView, item: Item): void {
+		view.decorSig = item.decorSig;
+		const decor = item.decor;
+		const decorated = decor !== null;
+		if (decorated !== (view.text !== view.content)) {
+			// switch between plain content and the row; the text is written again
+			view.token++;
+			view.content.empty();
+			view.check = null;
+			view.checkInput = null;
+			view.progress = null;
+			view.text = decorated ? view.content.createSpan({ cls: CLS.taskText }) : view.content;
+			view.textKey = null;
+			view.content.toggleClass(CLS.taskDecor, decorated);
+		}
+		const char = item.taskChar;
+		if (decor?.task && char !== null) {
+			if (!view.check || !view.checkInput) {
+				// created inside the node (its own document, popout windows), then moved to the front
+				view.check = view.content.createSpan({ cls: DOM.taskCheckbox });
+				view.checkInput = view.check.createEl("input", { cls: CLS.taskInput, type: "checkbox" });
+				view.checkInput.tabIndex = -1;
+				view.content.prepend(view.check);
+			}
+			view.checkInput.checked = char !== " ";
+			view.checkInput.setAttr("data-task", char);
+			view.check.toggleClass("is-readonly", this.model?.readOnly === true);
+		} else if (view.check) {
+			view.check.remove();
+			view.check = null;
+			view.checkInput = null;
+		}
+		view.el.toggleClass(DOM.taskDone, char !== null && char !== " ");
+		if (decor?.progress) {
+			if (!view.progress) view.progress = view.content.createSpan({ cls: DOM.taskProgress });
+			view.progress.textContent = decor.progress;
+			view.progress.toggleClass(CLS.complete, item.complete);
+		} else if (view.progress) {
+			view.progress.remove();
+			view.progress = null;
+		}
 	}
 
 	/** Border-box size of a node from its content box; integers like the estimate. */
@@ -972,7 +1151,7 @@ class Renderer implements MapRenderer {
 			view.el.classList.toggle(DOM.searchMatch, model.searchMatches?.has(id) ?? false);
 			view.el.classList.toggle(DOM.searchCurrent, model.searchCurrent === id);
 			view.el.classList.toggle(DOM.focusRoot, model.focusId === id);
-			const tab = id === focusTarget ? 0 : -1;
+			const tab = id === focusTarget && !model.readOnly ? 0 : -1;
 			if (tab !== view.tab) {
 				view.el.tabIndex = tab;
 				view.tab = tab;
@@ -997,7 +1176,7 @@ class Renderer implements MapRenderer {
 				view.count = count;
 			}
 			// collapse dot: expanded nodes with children, not the root of what is drawn
-			const canToggle = item.node.children.length > 0 && !item.collapsed && id !== this.layoutRoot;
+			const canToggle = item.node.children.length > 0 && !item.collapsed && id !== this.layoutRoot && !model.readOnly;
 			if (canToggle && !view.toggle) {
 				view.toggle = view.el.createSpan({ cls: CLS.toggle });
 				view.toggle.setAttr("aria-hidden", "true");
@@ -1345,11 +1524,27 @@ class Renderer implements MapRenderer {
 
 	private onPointerDown(e: PointerEvent): void {
 		if (this.inEditor(e.target)) return;
+		this.taskDown = null;
 		// the collapse dot and the count pill toggle on click; they never select or drag
 		if (this.collapseHandle(e.target) && e.button === 0 && !this.gestures.busy) {
 			e.preventDefault();
 			e.stopPropagation();
 			this.toggleDown = e.pointerId;
+			return;
+		}
+		// so does a task checkbox (spec 5.9): no selection, editing, drag or box select, mouse or touch
+		if (this.taskHandle(e.target) && e.button === 0 && !this.gestures.busy) {
+			e.preventDefault();
+			e.stopPropagation();
+			this.taskDown = e.pointerId;
+			return;
+		}
+		// and a map card (spec 5.10), which opens its map on click, read-only maps included
+		this.cardDown = null;
+		if (this.cardOf(e.target) && e.button === 0 && !this.gestures.busy) {
+			e.preventDefault();
+			e.stopPropagation();
+			this.cardDown = e.pointerId;
 			return;
 		}
 		if (!this.gestures.busy) {
@@ -1378,9 +1573,13 @@ class Renderer implements MapRenderer {
 		}
 	}
 
+	wheelPan = false;
+
 	private onWheel(e: WheelEvent): void {
-		e.preventDefault();
 		const zoomKey = e.ctrlKey || (Platform.isMacOS && e.metaKey);
+		// a read-only map leaves the plain wheel to the note around it (spec 5.10)
+		if (!zoomKey && this.model?.readOnly && !this.wheelPan) return;
+		e.preventDefault();
 		const action = wheelAction(e.deltaX, e.deltaY, e.deltaMode, zoomKey, e.shiftKey);
 		if ("zoom" in action) {
 			const rect = this.rootEl.getBoundingClientRect();
@@ -1391,7 +1590,7 @@ class Renderer implements MapRenderer {
 	}
 
 	private onContextMenu(e: MouseEvent): void {
-		if (this.inEditor(e.target)) return;
+		if (this.inEditor(e.target) || this.model?.readOnly) return;
 		e.preventDefault();
 		const id = this.gestures.nativeContextMenu(this.targetOf(e.target));
 		if (id) this.events.contextMenu(id, { x: e.clientX, y: e.clientY });
@@ -1410,8 +1609,35 @@ class Renderer implements MapRenderer {
 		return isElement(target) && target.closest(`.${CLS.toggle}, .${CLS.badge}`) !== null;
 	}
 
+	private taskHandle(target: EventTarget | null): boolean {
+		return isElement(target) && target.closest(`.${DOM.taskCheckbox}`) !== null;
+	}
+
+	/** The map card under `target`, if any. */
+	private cardOf(target: EventTarget | null): HTMLElement | null {
+		const el = isElement(target) ? target.closest<HTMLElement>(`.${DOM.mapCard}`) : null;
+		return el && this.canvas.contains(el) ? el : null;
+	}
+
 	private onNativeClick(e: MouseEvent): void {
 		if (this.inEditor(e.target)) return;
+		const card = this.cardOf(e.target);
+		if (card) {
+			e.preventDefault();
+			const down = this.cardDown !== null;
+			this.cardDown = null;
+			const link = card.getAttribute(DOM.mapCardLink);
+			if (down && e.button === 0 && link) this.events.cardClick?.(link, e);
+			return;
+		}
+		if (this.taskHandle(e.target)) {
+			e.preventDefault();
+			const t = this.targetOf(e.target);
+			const down = this.taskDown !== null;
+			this.taskDown = null;
+			if (down && t.kind === "node" && e.button === 0 && this.model?.readOnly !== true) this.events.taskToggle?.(t.id);
+			return;
+		}
 		if (this.collapseHandle(e.target)) {
 			e.preventDefault();
 			const t = this.targetOf(e.target);
@@ -1477,7 +1703,10 @@ class Renderer implements MapRenderer {
 	}
 
 	private drawBox(r: BoxRect): void {
-		if (!this.box) this.box = this.rootEl.createDiv({ cls: CLS.box });
+		if (!this.box) {
+			this.box = this.rootEl.createDiv({ cls: CLS.box });
+			this.rootEl.addClass(DOM.boxSelecting);
+		}
 		this.box.style.setProperty("transform", `translate(${r.x0}px, ${r.y0}px)`);
 		this.box.style.setProperty("width", `${r.x1 - r.x0}px`);
 		this.box.style.setProperty("height", `${r.y1 - r.y0}px`);
@@ -1486,6 +1715,7 @@ class Renderer implements MapRenderer {
 	private clearBox(): void {
 		this.box?.remove();
 		this.box = null;
+		this.rootEl.removeClass(DOM.boxSelecting);
 	}
 
 	// ---- node drag (spec 4.1, drag feedback) ---------------------------------
@@ -1544,7 +1774,9 @@ class Renderer implements MapRenderer {
 			for (const prop of GHOST_STYLE) card.style.setProperty(prop, cs.getPropertyValue(prop));
 			card.appendChild(view.content.cloneNode(true));
 		} else {
-			card.textContent = this.items.get(id)?.node.text ?? "";
+			const item = this.items.get(id);
+			if (item?.cards) card.replaceChildren(...this.cardNodes(item.drawn, item.cards, card));
+			else card.textContent = item?.shown ?? "";
 		}
 		if (count > 1) ghost.createSpan({ cls: CLS.ghostCount, text: String(count) });
 		return ghost;
@@ -1750,8 +1982,13 @@ class Renderer implements MapRenderer {
 }
 
 /** Size-cache key of a node's content at `font`. */
-function contentKey(node: MapNode, plain: boolean, shown: string, font: NodeFont, maxWidth: number): string {
-	return sizeKey((plain ? "p" : "r") + node.kind[0] + (node.text === "" ? "\u0000" : "") + shown, font, maxWidth);
+/** What a node draws, cards and their labels included (part of its size key). */
+function drawnKey(item: Item): string {
+	return item.cards ? `${item.drawn}\u0001${item.cards.map((c) => c.label).join("\u0001")}` : item.shown;
+}
+
+function contentKey(node: MapNode, plain: boolean, shown: string, decor: NodeDecor | null, font: NodeFont, maxWidth: number): string {
+	return sizeKey((plain ? "p" : "r") + node.kind[0] + (node.text === "" ? "\u0000" : "") + decorKey(decor) + shown, font, maxWidth);
 }
 
 /** What the ghost card copies from the grabbed node's computed style. */

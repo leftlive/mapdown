@@ -34,10 +34,36 @@ export function isPlainText(text: string, kind: NodeKind): boolean {
 	return !SYNTAX.test(text);
 }
 
-/** Source handed to renderMarkdown: line breaks inside one block become `<br>`. */
+const QUOTE_LINE = /^ *>/;
+
+/** True when every line of the text starts with `>` (a blockquote or callout, spec 5.6). */
+export function isQuoteText(text: string): boolean {
+	const lines = text.replace(/(\r?\n)+$/, "").split(/\r?\n/);
+	return lines.every((l) => QUOTE_LINE.test(l));
+}
+
+/** Source handed to renderMarkdown: line breaks inside one block become `<br>`; a quote keeps its lines. */
 export function markdownSource(text: string, kind: NodeKind): string {
 	if (kind === "code" || kind === "table") return text;
+	if (isQuoteText(text)) return text;
 	return text.replace(/\r?\n/g, "<br>");
+}
+
+/**
+ * The text a quote or callout shows, for the size estimate: no `>` markers,
+ * and a callout's `[!type]+ Title` line as its title (the type when untitled).
+ */
+export function quoteShown(text: string): string {
+	const lines = text
+		.replace(/(\r?\n)+$/, "")
+		.split(/\r?\n/)
+		.map((l) => l.replace(/^ *(?:> ?)+/, ""));
+	const m = /^\[!([^\]\s]+)\][+-]?[ \t]*(.*)$/.exec(lines[0] ?? "");
+	if (m) {
+		const type = m[1];
+		lines[0] = m[2].trim() !== "" ? m[2].trim() : type.charAt(0).toUpperCase() + type.slice(1).toLowerCase();
+	}
+	return lines.join("\n");
 }
 
 export interface NodeFont {
@@ -69,6 +95,86 @@ export function extraH(font: NodeFont): number {
 
 export function sizeKey(text: string, font: NodeFont, maxWidth: number): string {
 	return `${font.px}|${font.weight}|${font.level}|${maxWidth}|${text}`;
+}
+
+/**
+ * Task checkbox and progress label (spec 5.9), in em of the node's font. Keep
+ * in sync with `.mapdown-task-checkbox` and `.mapdown-task-progress` in styles.css.
+ */
+export const TASK_BOX_EM = 1;
+export const TASK_GAP_EM = 0.4;
+/** The label's font size relative to the node's; it is drawn at weight 400. */
+export const PROGRESS_SCALE = 0.75;
+/** Gap before the label, in em of the label's own (smaller) font. */
+export const PROGRESS_GAP_EM = 0.6;
+export const PROGRESS_WEIGHT = 400;
+
+/** What sits beside a node's text: a checkbox in front, a "done/total" label after. */
+export interface NodeDecor {
+	task: boolean;
+	/** E.g. "2/5"; null when the node shows no progress. */
+	progress: string | null;
+}
+
+/** Widths taken in front of (`lead`) and after (`tail`) the text; `measureLabel` measures at the label's font. */
+export function decorWidths(decor: NodeDecor | null, font: NodeFont, measureLabel: (s: string) => number): { lead: number; tail: number } {
+	if (!decor) return { lead: 0, tail: 0 };
+	return {
+		lead: decor.task ? (TASK_BOX_EM + TASK_GAP_EM) * font.px : 0,
+		tail: decor.progress !== null ? PROGRESS_GAP_EM * PROGRESS_SCALE * font.px + measureLabel(decor.progress) : 0,
+	};
+}
+
+/** The decor's part of a size key: done or open draws the same width, so it is left out. */
+export function decorKey(decor: NodeDecor | null): string {
+	return decor ? `${decor.task ? "t" : "-"}${decor.progress ?? ""}|` : "";
+}
+
+/** Font of the progress label of a node with `font` (for measuring it). */
+export function progressFont(font: NodeFont): NodeFont {
+	return { ...font, px: font.px * PROGRESS_SCALE, weight: PROGRESS_WEIGHT };
+}
+
+/**
+ * A map card inside a node's text (spec 5.10): [icon][gap][label][gap][arrow]
+ * with padding on both sides, in em of the node's font. Keep in sync with
+ * `.mapdown-map-card` in styles.css. The export draws icon and label only.
+ */
+export const CARD_PAD_EM = 0.3;
+export const CARD_ICON_EM = 1;
+export const CARD_GAP_EM = 0.25;
+export const CARD_ARROW_EM = 0.8;
+
+/** Width of a card whose label measures `labelWidth`, at font size `px`. */
+export function cardWidth(labelWidth: number, px: number): number {
+	return (2 * CARD_PAD_EM + CARD_ICON_EM + 2 * CARD_GAP_EM + CARD_ARROW_EM) * px + labelWidth;
+}
+
+/**
+ * A text measurer for text in which card marks (`mark + n`, core/mapCard.ts)
+ * stand for the cards labelled `labels[n]`: each mark measures as its whole card.
+ */
+export function withCardMarks(measure: (s: string) => number, labels: readonly string[], px: number, mark: number): (s: string) => number {
+	if (labels.length === 0) return measure;
+	const widths = new Map<string, number>();
+	const re = new RegExp(`[${String.fromCharCode(mark)}-${String.fromCharCode(mark + labels.length - 1)}]`, "g");
+	return (s) => {
+		re.lastIndex = 0;
+		if (!re.test(s)) return measure(s);
+		re.lastIndex = 0;
+		let w = 0;
+		let last = 0;
+		for (let m = re.exec(s); m; m = re.exec(s)) {
+			if (m.index > last) w += measure(s.slice(last, m.index));
+			const c = m[0];
+			let cw = widths.get(c);
+			if (cw === undefined) widths.set(c, (cw = cardWidth(measure(labels[c.charCodeAt(0) - mark] ?? ""), px)));
+			w += cw;
+			last = m.index + 1;
+		}
+		if (last < s.length) w += measure(s.slice(last));
+		return w;
+	};
 }
 
 const CJK = "⺀-鿿　-〿가-힯豈-﫿＀-￯";
@@ -142,10 +248,22 @@ export function domSize(contentW: number, contentH: number, font: NodeFont, maxW
 	return boxSize(contentW, contentH, font, maxWidth);
 }
 
-/** Estimated border-box size of a node; integers, like offsetWidth. */
-export function estimateSize(text: string, font: NodeFont, maxWidth: number, measure: (s: string) => number): Size {
-	const r = wrapText(text, maxWidth - extraW(font), measure);
-	return boxSize(r.width, r.lines * font.px * LINE_HEIGHT, font, maxWidth);
+/**
+ * Estimated border-box size of a node; integers, like offsetWidth. `decor`
+ * (checkbox in front, progress after, see `decorWidths`) sits beside the text
+ * in a row, so the text wraps in what is left of the width.
+ */
+export function estimateSize(
+	text: string,
+	font: NodeFont,
+	maxWidth: number,
+	measure: (s: string) => number,
+	decor: { lead: number; tail: number } = { lead: 0, tail: 0 },
+): Size {
+	const side = decor.lead + decor.tail;
+	const shown = isQuoteText(text) ? quoteShown(text) : text;
+	const r = wrapText(shown, maxWidth - extraW(font) - side, measure);
+	return boxSize(r.width + side, r.lines * font.px * LINE_HEIGHT, font, maxWidth);
 }
 
 interface Entry {

@@ -14,7 +14,8 @@ import type { LayoutResult } from '../core/layout.ts';
 import { indexNodes } from '../controller/session.ts';
 import { folderOf } from '../controller/fileNames.ts';
 import { isChinese, t } from '../i18n.ts';
-import { LINE_HEIGHT, NODE_BORDER, NODE_LEVELS, extraW, fontFor } from '../view/measure.ts';
+import { taskOf, taskProgress } from '../core/tasks.ts';
+import { LINE_HEIGHT, NODE_BORDER, NODE_LEVELS, PROGRESS_SCALE, TASK_BOX_EM, decorWidths, extraW, fontFor, progressFont } from '../view/measure.ts';
 import type { MapView } from '../view/MapView.ts';
 import {
 	buildSvg,
@@ -25,6 +26,8 @@ import {
 	imageMime,
 	imageSize,
 	layoutContent,
+	markTaskDone,
+	markCards,
 	parseBlocks,
 	type Block,
 	type ExportTheme,
@@ -107,6 +110,10 @@ async function runExport(ctx: Context, lay: LayoutResult, format: ExportFormat, 
 	const index = indexNodes(ctx.view.session.doc.root);
 	const settings = ctx.view.plugin.settings;
 	const measurer = createMeasurer(ctx.doc, theme);
+	// PNG and JPEG draw task checkboxes, the done style and progress; HTML stays as before (spec 5.9)
+	const tasks = format !== 'html';
+	const counts = tasks && settings.showTaskProgress ? taskProgress(ctx.view.session.doc.root) : null;
+	const cards = format !== 'html' ? ctx.view.cardLabels() : null;
 
 	// blocks of every visible node, then every image they embed
 	const blocksOf = new Map<string, Block[]>();
@@ -116,7 +123,11 @@ async function runExport(ctx: Context, lay: LayoutResult, format: ExportFormat, 
 		if (!entry) continue;
 		const isVirtualRoot = entry.node === ctx.view.session.doc.root && ctx.view.session.doc.virtualRoot;
 		const text = isVirtualRoot ? ctx.view.session.rootName : entry.node.text;
-		const blocks = parseBlocks(text, entry.node.kind);
+		const task = tasks ? taskOf(text, entry.node.kind) : null;
+		const own = task ? text.slice(task.length) : text;
+		// PNG and JPEG draw map embeds as cards (spec 5.10); HTML keeps the text as before
+		const parsed = parseBlocks(entry.node.kind === 'code' ? own : markCards(own, cards), entry.node.kind);
+		const blocks = task?.done ? markTaskDone(parsed) : parsed;
 		blocksOf.set(id, blocks);
 		for (const b of blocks) if (b.type === 'image') imageBlocks.push(b);
 	}
@@ -138,11 +149,17 @@ async function runExport(ctx: Context, lay: LayoutResult, format: ExportFormat, 
 		const blocks = blocksOf.get(id);
 		if (!entry || !blocks) continue;
 		const font = fontFor(entry.depth, settings.fontSize);
+		const task = tasks ? taskOf(entry.node.text, entry.node.kind) : null;
+		const count = counts?.get(id);
+		const label = count ? `${count.done}/${count.total}` : null;
+		const lf = progressFont(font);
+		const side = decorWidths(task || label ? { task: task !== null, progress: label } : null, font, (s) => measurer.text(s, {}, lf.px, lf.weight));
+		const lineHeight = font.px * LINE_HEIGHT;
 		const content = layoutContent({
 			blocks,
-			innerWidth: Math.max(1, p.width - extraW(font)),
+			innerWidth: Math.max(1, p.width - extraW(font) - side.lead - side.tail),
 			fontPx: font.px,
-			lineHeight: font.px * LINE_HEIGHT,
+			lineHeight,
 			measure: (s, style) => measurer.text(s, style, font.px, font.weight),
 			measureMono: (s) => measurer.mono(s, font.px),
 			image: (b) => images.get(imageKey(b)) ?? null,
@@ -163,6 +180,8 @@ async function runExport(ctx: Context, lay: LayoutResult, format: ExportFormat, 
 			padX: font.padX,
 			padY: font.padY,
 			radius: font.radius,
+			task: task ? { done: task.done, size: font.px * TASK_BOX_EM, lead: side.lead, cy: lineHeight / 2 } : null,
+			progress: count && label ? { label, complete: count.done === count.total, fontPx: font.px * PROGRESS_SCALE, cy: lineHeight / 2 } : null,
 		});
 	}
 	const scene: Scene = { box: exportBox(lay.bounds), nodes, edges: lay.edges, rootId, theme };
@@ -249,6 +268,9 @@ function readTheme(ctx: Context): ExportTheme {
 		monoFamily: v('--font-monospace', 'monospace'),
 		radius: px('--radius-s', 4),
 		rootRadius: px('--radius-m', 8),
+		taskDone: v('--checklist-done-color', v('--text-muted', '#888888')),
+		muted: v('--text-muted', '#888888'),
+		success: v('--text-success', v('--color-green', '#08b94e')),
 	};
 }
 
