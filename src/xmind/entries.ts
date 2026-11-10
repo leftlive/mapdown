@@ -11,6 +11,7 @@ import { availableSiblingPath } from './paths.ts';
 import { importXmindFile, pickXmindFile } from './importFile.ts';
 import { buildXmindArchive, mapToXmindSheet, toExportTree } from './write.ts';
 import { MapView } from '../view/MapView.ts';
+import { chooseTarget, discardTarget, explainFallback, progressNotice, showDone, writeTarget, type Target } from '../export/save.ts';
 
 const isXmind = (name: string): boolean => /\.xmind$/i.test(name);
 
@@ -20,25 +21,48 @@ function importFolder(plugin: MapdownPlugin, near?: string): TFolder {
 }
 
 /**
- * Write the open map as `<note>.xmind` next to the note (numbered when taken).
- * An edit in progress is committed and saved first (spec 2.3, 6.5). The map
- * and the note are not changed.
+ * Write the open map as `<note>.xmind`: through the "Save as" dialog, or next
+ * to the note (numbered when taken), per `exportLocation` (spec 2.3). Call it
+ * straight from the command: the dialog opens before anything is awaited. An
+ * edit in progress is committed and saved first (spec 2.3, 6.5). The map and
+ * the note are not changed. Resolves to the vault file, or null when the file
+ * went outside the vault, the export was cancelled or it failed.
  */
 export async function exportXmind(view: MapView): Promise<TFile | null> {
-	await view.flush();
-	const file = view.file;
-	if (!file) return null;
-	const session = view.session;
-	const tree = toExportTree(session.doc.root, session.view.collapsed, session.doc.virtualRoot ? session.rootName : undefined);
-	const vault = view.app.vault;
+	const first = view.file;
+	if (!first) return null;
+	const win = view.contentEl.ownerDocument.defaultView ?? window;
+	const picked = chooseTarget(win, view.plugin.settings.exportLocation, first.basename, 'xmind');
+	const closed = (): boolean => !view.contentEl.isConnected;
+	let target: Target | null = null;
+	let progress: { stop(): void } | null = null;
 	try {
+		await view.flush();
+		target = await picked;
+		if (!target) return null;
+		const file = view.file;
+		if (!file || closed()) {
+			await discardTarget(target);
+			return null;
+		}
+		progress = progressNotice(win);
+		const session = view.session;
+		const tree = toExportTree(session.doc.root, session.view.collapsed, session.doc.virtualRoot ? session.rootName : undefined);
+		const vault = view.app.vault;
 		const sheet = mapToXmindSheet(tree, file.basename, view.direction());
 		const data = await buildXmindArchive(sheet, view.plugin.manifest.version);
-		const path = availableSiblingPath(folderOf(file.path), file.basename, 'xmind', (p) => vault.getAbstractFileByPath(p) !== null);
-		const created = await vault.createBinary(path, data);
-		new Notice(t('xmind-exported', created.path));
-		return created;
+		if (closed()) {
+			progress.stop();
+			await discardTarget(target);
+			return null;
+		}
+		const saved = await writeTarget(view.app, target, () => availableSiblingPath(folderOf(file.path), file.basename, 'xmind', (p) => vault.getAbstractFileByPath(p) !== null), data);
+		progress.stop();
+		showDone(view.app, saved, 'xmind-exported', { fellBack: explainFallback(target) });
+		return saved.file;
 	} catch (err) {
+		progress?.stop();
+		await discardTarget(target ?? (await picked));
 		console.error('Failed to export to XMind:', err);
 		new Notice(t('xmind-export-failed', err instanceof Error ? err.message : String(err)));
 		return null;

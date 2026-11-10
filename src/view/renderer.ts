@@ -8,7 +8,7 @@
 // visible nodes only get DOM near the viewport; the rest use estimates.
 
 import { Platform, setIcon } from "obsidian";
-import type { MapNode, Point, Size } from "../core/types.ts";
+import type { LayoutDirection, MapNode, Point, Size } from "../core/types.ts";
 import { taskOf } from "../core/tasks.ts";
 import { CARD_MARK, CARD_MARKS, cardSlots, type CardSlot } from "../core/mapCard.ts";
 import { branchLook, createLayouter, type LayoutInput, type LayoutResult, type NodePlacement } from "../core/layout.ts";
@@ -442,6 +442,8 @@ class Renderer implements MapRenderer {
 			this.rootEl.style.setProperty("--mapdown-node-max-width", `${model.nodeMaxWidth}px`);
 			this.rootEl.style.setProperty("--mapdown-glow-size", `${model.nodeGlowSize}px`);
 		}
+		this.rootEl.toggleClass(DOM.branchBorder, model.branchStyle === "border");
+		this.rootEl.toggleClass(DOM.branchTint, model.branchStyle === "tint");
 		this.buildItems(model);
 		if (this.edit && !this.items.has(this.edit.id)) this.stopEditing();
 		this.render({ anchorId, anchorBefore, animate: (opts?.animate ?? false) || flight !== null });
@@ -464,6 +466,13 @@ class Renderer implements MapRenderer {
 
 	layoutSnapshot(): LayoutResult | null {
 		return this.lay;
+	}
+
+	layoutParams(): { direction: LayoutDirection; palette: readonly string[]; nodeMaxWidth: number } | null {
+		const model = this.model;
+		if (!model) return null;
+		const look = this.focusLook;
+		return { direction: look ? look.side : model.direction, palette: look ? [look.color] : model.palette, nodeMaxWidth: model.nodeMaxWidth };
 	}
 
 	renderedIds(): string[] {

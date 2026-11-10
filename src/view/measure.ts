@@ -42,11 +42,24 @@ export function isQuoteText(text: string): boolean {
 	return lines.every((l) => QUOTE_LINE.test(l));
 }
 
-/** Source handed to renderMarkdown: line breaks inside one block become `<br>`; a quote keeps its lines. */
+/** A closed `$$ … $$` span; line breaks inside it must stay real newlines for MathJax. */
+const DISPLAY_MATH = /\$\$[\s\S]*?\$\$/g;
+
+/**
+ * Source handed to renderMarkdown: line breaks inside one block become `<br>`
+ * (except inside a closed `$$ … $$` span); a quote keeps its lines.
+ */
 export function markdownSource(text: string, kind: NodeKind): string {
 	if (kind === "code" || kind === "table") return text;
 	if (isQuoteText(text)) return text;
-	return text.replace(/\r?\n/g, "<br>");
+	const br = (s: string): string => s.replace(/\r?\n/g, "<br>");
+	let out = "";
+	let last = 0;
+	for (const m of text.matchAll(DISPLAY_MATH)) {
+		out += br(text.slice(last, m.index)) + m[0];
+		last = m.index + m[0].length;
+	}
+	return out + br(text.slice(last));
 }
 
 /**
@@ -230,6 +243,16 @@ export function wrapText(text: string, maxWidth: number, measure: (s: string) =>
 	return { lines, width: Math.min(widest, max) };
 }
 
+/**
+ * Width at which a node's text wraps: the content box's CSS max width
+ * (`.mapdown-node-content` in styles.css) less the checkbox and progress label.
+ * The node's laid-out width is no substitute: it comes from offsetWidth, rounded
+ * to whole pixels, so text measuring 210.36 sits in a 210 px box on one line.
+ */
+export function textWrapWidth(maxWidth: number, font: NodeFont, decor: { lead: number; tail: number } = { lead: 0, tail: 0 }): number {
+	return maxWidth - extraW(font) - decor.lead - decor.tail;
+}
+
 /** Border-box size from a content-box size, clamped like the node's max width; integers. */
 export function boxSize(contentW: number, contentH: number, font: NodeFont, maxWidth: number): Size {
 	const ew = extraW(font);
@@ -262,7 +285,7 @@ export function estimateSize(
 ): Size {
 	const side = decor.lead + decor.tail;
 	const shown = isQuoteText(text) ? quoteShown(text) : text;
-	const r = wrapText(shown, maxWidth - extraW(font) - side, measure);
+	const r = wrapText(shown, textWrapWidth(maxWidth, font, decor), measure);
 	return boxSize(r.width + side, r.lines * font.px * LINE_HEIGHT, font, maxWidth);
 }
 

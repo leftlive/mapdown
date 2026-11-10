@@ -8,6 +8,12 @@ import type { LayoutDirection } from './core/types.ts';
 
 export type LinkOpenMode = 'current' | 'tab' | 'window';
 
+/** 1.2: where the branch colour shows besides the edges (spec 5.12). */
+export type BranchStyle = 'line' | 'border' | 'tint';
+
+/** 1.2: where exports are saved, asked each time or next to the note (spec 2.3). */
+export type ExportLocation = 'ask' | 'note';
+
 export interface MapdownSettings {
 	headLevel: number;
 	fontSize: number;
@@ -16,6 +22,8 @@ export interface MapdownSettings {
 	layoutDirect: LayoutDirection;
 	layout: string;
 	strokeArray?: string[];
+	/** 1.2: `line` (edges only), `border` or `tint` (spec 5.12). */
+	branchStyle: BranchStyle;
 	nodeGlowSize: number;
 	nodeMaxWidth: number;
 	focusOnMove: boolean;
@@ -30,6 +38,8 @@ export interface MapdownSettings {
 	embedMaps: boolean;
 	/** 1.1: default height of an embedded map, px. */
 	embedHeight: number;
+	/** 1.2: `ask` (the system "Save as" dialog) or `note` (next to the note). */
+	exportLocation: ExportLocation;
 }
 
 export const DEFAULT_SETTINGS: Readonly<MapdownSettings> = {
@@ -39,6 +49,7 @@ export const DEFAULT_SETTINGS: Readonly<MapdownSettings> = {
 	background: 'transparent',
 	layoutDirect: 'mindmap',
 	layout: 'mindmap',
+	branchStyle: 'line',
 	nodeGlowSize: 10,
 	nodeMaxWidth: 800,
 	focusOnMove: false,
@@ -50,11 +61,14 @@ export const DEFAULT_SETTINGS: Readonly<MapdownSettings> = {
 	showTaskProgress: true,
 	embedMaps: true,
 	embedHeight: 400,
+	exportLocation: 'ask',
 };
 
 export const CANVAS_SIZES = [4000, 6000, 8000, 10000, 12000, 16000, 20000, 30000, 36000] as const;
 const DIRECTIONS: readonly LayoutDirection[] = ['mindmap', 'right', 'left', 'clockwise'];
 const LINK_MODES: readonly LinkOpenMode[] = ['current', 'tab', 'window'];
+export const BRANCH_STYLES: readonly BranchStyle[] = ['line', 'border', 'tint'];
+export const EXPORT_LOCATIONS: readonly ExportLocation[] = ['ask', 'note'];
 
 /** The seven preset palettes (section 8). */
 export const PALETTES: Readonly<Record<string, readonly string[]>> = {
@@ -101,6 +115,7 @@ export function normalizeSettings(raw: unknown): MapdownSettings {
 		background: typeof r.background === 'string' ? r.background : d.background,
 		layoutDirect: oneOf(r.layoutDirect, DIRECTIONS, d.layoutDirect),
 		layout: typeof r.layout === 'string' ? r.layout : d.layout,
+		branchStyle: oneOf(r.branchStyle, BRANCH_STYLES, d.branchStyle),
 		nodeGlowSize: num(r.nodeGlowSize, d.nodeGlowSize, 0, 24, 1),
 		nodeMaxWidth: num(r.nodeMaxWidth, d.nodeMaxWidth, 240, 1200, 20),
 		focusOnMove: bool(r.focusOnMove, d.focusOnMove),
@@ -112,6 +127,7 @@ export function normalizeSettings(raw: unknown): MapdownSettings {
 		showTaskProgress: bool(r.showTaskProgress, d.showTaskProgress),
 		embedMaps: bool(r.embedMaps, d.embedMaps),
 		embedHeight: num(r.embedHeight, d.embedHeight, 150, 1200),
+		exportLocation: oneOf(r.exportLocation, EXPORT_LOCATIONS, d.exportLocation),
 	};
 	if (Array.isArray(r.strokeArray) && r.strokeArray.every((c) => typeof c === 'string')) {
 		out.strokeArray = [...r.strokeArray];

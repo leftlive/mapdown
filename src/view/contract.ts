@@ -4,6 +4,7 @@
 
 import type { LayoutResult } from '../core/layout.ts';
 import type { TaskCount } from '../core/tasks.ts';
+import type { BranchStyle } from '../settings.ts';
 import type { LayoutDirection, MapNode, Point } from '../core/types.ts';
 import type { Rect, Viewport } from './viewport.ts';
 
@@ -22,6 +23,12 @@ export const DOM = {
 	embedHint: 'mapdown-embed-hint',
 	/** The first-use tip inside an embed (spec 5.10); `is-shown` while visible; holds a close button (`mapdown-embed-tip-close`). */
 	embedTip: 'mapdown-embed-tip',
+	/**
+	 * On the map layer (`.mapdown-map`, in map views and embeds alike) for the branch colour style (spec 5.12):
+	 * `branchBorder` or `branchTint`; neither for `line`. Set by the renderer from `RenderModel.branchStyle`.
+	 */
+	branchBorder: 'mapdown-branch-border',
+	branchTint: 'mapdown-branch-tint',
 	/** The pannable, zoomable layer (CSS transform). */
 	canvas: 'mapdown-canvas',
 	/** One per rendered node; carries `data-node-id`, role="treeitem", tabindex. */
@@ -115,6 +122,8 @@ export interface RenderModel {
 	fontSize: number;
 	nodeMaxWidth: number;
 	nodeGlowSize: number;
+	/** Branch colour style (spec 5.12); absent means `line`. Switching it only changes classes, no layout. */
+	branchStyle?: BranchStyle;
 	/** Placeholder text for empty nodes (never written to the file). */
 	placeholder: string;
 	/** Search highlight (spec 5.4): matching ids and the current match. */
@@ -206,6 +215,11 @@ export interface MapRenderer {
 	renderedIds(): string[];
 	/** The last layout (read-only; the export draws from it). Null before the first render. */
 	layoutSnapshot(): LayoutResult | null;
+	/**
+	 * What the last layout used besides the node sizes (focus mode lays out on its branch's side, in its
+	 * colour) and the node max width; the export lays out again with these (spec 2.3). Null before the first render.
+	 */
+	layoutParams(): { direction: LayoutDirection; palette: readonly string[]; nodeMaxWidth: number } | null;
 	scrollIntoView(id: string): void;
 	/**
 	 * The part of the map not covered by floating UI (spec 5.1, available area), in map pixels. Measures

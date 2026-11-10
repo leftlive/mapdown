@@ -4,7 +4,7 @@
 // a document: a heading level offset, or a list indent and marker that follow
 // the neighbouring siblings.
 
-import { clampHeadLevel, writeMapOutline, writeOutline, type LineEnding, type OutlineSource } from './outline.ts';
+import { clampHeadLevel, formulaLines, hasMultilineFormula, writeMapOutline, writeOutline, type LineEnding, type OutlineSource } from './outline.ts';
 import type { MapNode } from './types.ts';
 
 /** The line kinds a node's text can be written into. */
@@ -64,8 +64,10 @@ export function isBlockText(text: string): boolean {
  * quote (contract 6.3). Surrounding whitespace is dropped; the parser would
  * drop it anyway.
  */
-export function encodeText(text: string, kind: TextKind): string {
-	const s = text.replace(/\r/g, '').trim().replace(/\n/g, '<br>');
+export function encodeText(text: string, kind: TextKind, cont?: { eol: string; pad: string }): string {
+	const t = text.replace(/\r/g, '').trim();
+	// A closed multi-line `$$ ... $$` keeps real line breaks in list items and paragraphs (6.3).
+	const s = cont && kind !== 'heading' && hasMultilineFormula(t) ? formulaLines(t, cont.eol, cont.pad) : t.replace(/\n/g, '<br>');
 	return kind === 'list' && s.startsWith('>') ? `\\${s}` : s;
 }
 
@@ -80,8 +82,8 @@ export function headingLine(level: number, text: string, blockId: string | null)
 }
 
 /** `<indent><marker> text ^id`; an empty item is just the marker. */
-export function listLine(indent: string, marker: string, text: string, blockId: string | null): string {
-	const enc = encodeText(text, 'list');
+export function listLine(indent: string, marker: string, text: string, blockId: string | null, eol = '\n'): string {
+	const enc = encodeText(text, 'list', { eol, pad: indent + ' '.repeat(marker.length + 1) });
 	return indent + marker + (enc ? ` ${enc}` : '') + blockIdSuffix(blockId);
 }
 
@@ -121,7 +123,15 @@ export function writeSubtree(node: NewNode, form: Form, ctx: WriteContext): Writ
 	} else {
 		lines = writeOutline(node, 0, source, eol).split(eol);
 		const first = lines[0] ?? '-';
-		if (form.marker !== '-' && !isBlockText(node.text)) lines[0] = form.marker + first.slice(1);
+		if (form.marker !== '-' && !isBlockText(node.text)) {
+			lines[0] = form.marker + first.slice(1);
+			// A multi-line formula's lines sit under the item's content column, which a longer marker moves.
+			if (hasMultilineFormula(node.text.trim())) {
+				const extra = ' '.repeat(form.marker.length - 1);
+				const n = node.text.trim().split('\n').length;
+				for (let i = 1; i < n; i++) if ((lines[i] ?? '') !== '') lines[i] = extra + lines[i];
+			}
+		}
 		lines = lines.map((l) => (l.trim() === '' ? l : form.indent + l));
 	}
 	const last = starts[starts.length - 1] ?? { line: 0, node };

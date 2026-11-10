@@ -71,13 +71,14 @@ import { exportMap, showExportMenu, type ExportFormat } from '../export/exporter
 export const VIEW_TYPE = 'mindmapViewUpgraded';
 
 /** The parts of a render model that come from the settings (map views and embedded maps). */
-export function settingsLook(s: MapdownSettings): Pick<RenderModel, 'direction' | 'palette' | 'fontSize' | 'nodeMaxWidth' | 'nodeGlowSize' | 'placeholder'> {
+export function settingsLook(s: MapdownSettings): Pick<RenderModel, 'direction' | 'palette' | 'fontSize' | 'nodeMaxWidth' | 'nodeGlowSize' | 'branchStyle' | 'placeholder'> {
 	return {
 		direction: s.layoutDirect,
 		palette: s.strokeArray && s.strokeArray.length > 0 ? s.strokeArray : DEFAULT_PALETTE,
 		fontSize: s.fontSize,
 		nodeMaxWidth: s.nodeMaxWidth,
 		nodeGlowSize: s.nodeGlowSize,
+		branchStyle: s.branchStyle,
 		placeholder: t('Placeholder'),
 	};
 }
@@ -1443,7 +1444,7 @@ export class MapView extends TextFileView implements KeyTarget, HoverParent {
 		return this.runSteps(steps);
 	}
 
-	/** Export next to the note (spec 2.2, 2.3); resolves quietly when the view closes first. */
+	/** Export through the "Save as" dialog or next to the note (spec 2.2, 2.3); resolves quietly when cancelled or the view closes first. */
 	exportImage(format: ExportFormat, scale = 1): Promise<void> {
 		const controller = new AbortController();
 		this.exports.add(controller);

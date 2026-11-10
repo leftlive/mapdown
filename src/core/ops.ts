@@ -659,7 +659,7 @@ function reflow(idx: DocIndex, x: MapNode, form: Form): Block | null {
 		} else if (t.t === 'list') {
 			owner = 'item';
 			const first = lines[0];
-			if (first) first.text = listLine(t.indent, t.marker, node.text, node.blockId);
+			if (first) first.text = listLine(t.indent, t.marker, node.text, node.blockId, eol);
 		}
 		const head = lines[0];
 		const before = out[out.length - 1];
@@ -1148,7 +1148,13 @@ function textEdits(idx: DocIndex, node: MapNode, value: string): TextEdit[] | nu
 			}
 			// A code block cannot keep children; `<br>` keeps it on the item's line instead.
 			if (block && value.trim().startsWith('~~~')) return null;
-			const enc = encodeText(value, 'list');
+			const col = s.textRange ? s.textRange.from - lineStartOf(text, s.range.from) : null;
+			const startCol = col ?? (() => {
+				const fl = firstLine(text, node);
+				const m = LIST_LINE.exec(fl);
+				return m ? fl.length - (m[2] ?? '').length : lead.length;
+			})();
+			const enc = encodeText(value, 'list', { eol, pad: firstLine(text, node).slice(0, startCol).replace(/[^ \t]/g, ' ') });
 			if (s.textRange) return [spanEdit(text, s.textRange, enc)];
 			const m = LIST_LINE.exec(firstLine(text, node));
 			const start = s.range.from + (m ? firstLine(text, node).length - (m[2] ?? '').length : lead.length);
@@ -1161,7 +1167,7 @@ function textEdits(idx: DocIndex, node: MapNode, value: string): TextEdit[] | nu
 				const indent = emptyItemIndent(idx, node);
 				return indent === null ? null : [{ from: s.range.from, to: s.range.to, insert: listLine(indent, '-', '', node.blockId) }];
 			}
-			const enc = encodeText(value, 'paragraph');
+			const enc = encodeText(value, 'paragraph', { eol, pad: lead });
 			if (s.textRange) return [spanEdit(text, s.textRange, enc)];
 			return [{ from: s.range.from + lead.length, to: textEnd(text, node), insert: enc }];
 		}
@@ -1171,10 +1177,10 @@ function textEdits(idx: DocIndex, node: MapNode, value: string): TextEdit[] | nu
 				const indent = emptyItemIndent(idx, node);
 				if (indent === null && (s.list || value.trim() === '')) return null;
 				const line = s.list
-					? listLine(indent ?? s.list.indent, s.list.marker, value, node.blockId)
+					? listLine(indent ?? s.list.indent, s.list.marker, value, node.blockId, eol)
 					: value.trim() === ''
 						? listLine(indent ?? lead, '-', '', node.blockId)
-						: lead + encodeText(value, 'paragraph') + (node.blockId ? ` ^${node.blockId}` : '');
+						: lead + encodeText(value, 'paragraph', { eol, pad: lead }) + (node.blockId ? ` ^${node.blockId}` : '');
 				return [{ from: s.range.from, to: s.range.to, insert: line }];
 			}
 			if (!s.list) return [{ from: s.range.from, to: s.range.to, insert: bareBlock(lead, value, node.blockId, eol) }];

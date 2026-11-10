@@ -12,6 +12,8 @@ export const DEFAULT_PALETTE_KEY = 'default';
 
 export const DIRECTION_VALUES = ['mindmap', 'right', 'left', 'clockwise'] as const;
 export const LINK_MODE_VALUES = ['current', 'tab', 'window'] as const;
+export const BRANCH_STYLE_VALUES = ['line', 'border', 'tint'] as const;
+export const EXPORT_LOCATION_VALUES = ['ask', 'note'] as const;
 
 /** Setting keys that have a control (`layout` is kept in data.json but not shown). */
 export type SettingKey = Exclude<keyof MapdownSettings, 'layout'>;
@@ -71,6 +73,14 @@ export function applySetting(current: MapdownSettings, key: SettingKey, value: u
 		case 'linkOpenMode':
 			if (!(LINK_MODE_VALUES as readonly unknown[]).includes(value)) return null;
 			next.linkOpenMode = value as MapdownSettings['linkOpenMode'];
+			return next;
+		case 'branchStyle':
+			if (!(BRANCH_STYLE_VALUES as readonly unknown[]).includes(value)) return null;
+			next.branchStyle = value as MapdownSettings['branchStyle'];
+			return next;
+		case 'exportLocation':
+			if (!(EXPORT_LOCATION_VALUES as readonly unknown[]).includes(value)) return null;
+			next.exportLocation = value as MapdownSettings['exportLocation'];
 			return next;
 		case 'strokeArray':
 			if (value === DEFAULT_PALETTE_KEY || value === undefined) {

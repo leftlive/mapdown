@@ -1,5 +1,7 @@
 [中文说明](Readme-zh.md)
 
+![Mapdown: Obsidian mind maps in plain Markdown](docs/screenshots/mapdown-banner.jpg)
+
 # Mapdown
 
 **One Markdown note, two views.** Write in text, think in a mind map, and keep the two in sync.
@@ -64,11 +66,13 @@ When you open an ordinary note as a mind map, Mapdown asks first. You can conver
 - **Embedded maps:** in reading view and Live Preview, `![[map]]` shows a map; `![[map#Heading]]` shows one branch and `![[map|300]]` sets the height. Click it to pan and zoom, double-click a node to open the map there. Inside a node, an embedded map shows as a card that opens it.
 - **Tasks:** click a checkbox, or press `Mod + Enter`, to tick a task. Parents count the tasks below them.
 - **Quotes and callouts** in nodes look as they do in reading view.
+- **Math:** inline `$…$` and block `$$…$$` formulas render in nodes, including blocks over several lines.
+- **Branch color styles:** besides the edges, branch colors can also go on node borders, or tint the nodes with a light fill that fades toward the outer levels.
 - **Paste an outline:** a multi-line list pasted into the map becomes a subtree.
 - **Images:** paste, drag in, or run **Insert image…**.
 - **Large maps:** collapse to any level with `Alt + 1…6`, search inside collapsed branches, and jump around with the overview on maps over 300 nodes.
 - **XMind:** import `.xmind` files (XMind 2020+, Zen and XMind 8) as new notes, and export maps back to `.xmind`.
-- **Export:** PNG and JPEG at 1x, 2x or 4x, or a self-contained HTML page.
+- **Export:** PNG and JPEG at 1x, 2x or 4x, SVG, PDF, or a self-contained HTML page. On desktop, Mapdown asks where to save by default, and tells you when the export is done.
 
 ![Several nodes selected with a box on the canvas](docs/screenshots/mapdown-multiselect.png)
 
@@ -109,12 +113,14 @@ Every action is also a command, so you can find it in the command palette and as
 | Node glow and maximum width | How selected nodes glow and where long text wraps |
 | Layout direction | Both sides, right, left, or clockwise |
 | Branch colors | Color preset for branches |
+| Branch color style | Edges only, borders, or tinted nodes |
 | Center after moving | Recenter on a node after it moves |
 | Focus overlay and glow | How strongly Focus Mode dims the rest of the map |
 | Link preview and open mode | Hover previews, and where clicked links open |
 | Sync selection with Markdown | Turn the text–map selection sync on or off |
 | Show task progress | Show `done/total` on nodes with tasks below them |
 | Embedded maps and height | Show `![[map]]` as a map, and how tall it is |
+| Export location | Ask where to save each time, or save next to the note |
 
 Changes apply to open maps right away, and every setting can be found with Obsidian's settings search.
 
@@ -122,11 +128,13 @@ Changes apply to open maps right away, and every setting can be found with Obsid
 
 - Mapdown structures notes; it is not a diagram tool. There are no themes, frames or free-form drawing.
 - XMind import and export are one-off conversions. Images, styles, summaries and relationships are not carried over.
+- In exported PNG, JPEG, SVG and PDF files, formulas show as their source text. A PDF is one page holding a high-resolution image, so its text cannot be selected.
+- On phones and tablets, exports are always saved next to the note.
 - The interface is in English and Simplified Chinese.
 
 ## Privacy
 
-Mapdown has no accounts, ads or telemetry, and never reads files outside your vault. It goes online only when you export a map that shows images from the web: those images are downloaded so they can be embedded in the PNG, JPEG or HTML file.
+Mapdown has no accounts, ads or telemetry, and never reads files outside your vault. It goes online only when you export a map that shows images from the web: those images are downloaded so they can be embedded in the exported file.
 
 ## Installation
 

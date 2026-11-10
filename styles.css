@@ -179,6 +179,50 @@
 	box-shadow: var(--mapdown-node-glow);
 }
 
+/* ---- branch colour style (spec 5.12) -----------------------------------
+   Classes on the map layer (src/view/contract.ts DOM.branchBorder/Tint); none = "edges only".
+   Colours only: border width, padding and radius stay as above, so node sizes do not change.
+   :where() keeps these as weak as the base level rules, so hover, selection and search
+   (later in this file) still win. Percentages: branch colour in the mix. */
+:where(.mapdown-branch-border, .mapdown-branch-tint) .mapdown-edges path {
+	stroke-width: 1.6px;
+}
+
+:where(.mapdown-branch-border, .mapdown-branch-tint) .mapdown-edges path.is-root-edge {
+	stroke-width: 2.4px;
+}
+
+:where(.mapdown-branch-border) .mapdown-node.is-level-1 {
+	border-color: color-mix(in srgb, var(--mapdown-branch-color, var(--background-modifier-border)) 75%, var(--background-modifier-border));
+}
+
+:where(.mapdown-branch-border) .mapdown-node.is-level-2 {
+	border-color: color-mix(in srgb, var(--mapdown-branch-color, var(--background-modifier-border)) 55%, var(--background-modifier-border));
+}
+
+:where(.mapdown-branch-border) .mapdown-node.is-level-deep {
+	border-color: color-mix(in srgb, var(--mapdown-branch-color, var(--background-modifier-border)) 35%, var(--background-modifier-border));
+}
+
+:where(.mapdown-branch-tint) .mapdown-node.is-level-1 {
+	background: color-mix(in srgb, var(--mapdown-branch-color, var(--background-primary)) 22%, var(--background-primary));
+	border-color: color-mix(in srgb, var(--mapdown-branch-color, var(--background-modifier-border)) 70%, var(--background-primary));
+}
+
+:where(.mapdown-branch-tint) .mapdown-node.is-level-1::before {
+	display: none;
+}
+
+:where(.mapdown-branch-tint) .mapdown-node.is-level-2 {
+	background: color-mix(in srgb, var(--mapdown-branch-color, var(--background-primary)) 10%, var(--background-primary));
+	border-color: color-mix(in srgb, var(--mapdown-branch-color, var(--background-modifier-border)) 45%, var(--background-modifier-border));
+}
+
+:where(.mapdown-branch-tint) .mapdown-node.is-level-deep {
+	background: color-mix(in srgb, var(--mapdown-branch-color, var(--background-primary)) 5%, var(--background-primary));
+	border-color: color-mix(in srgb, var(--mapdown-branch-color, var(--background-modifier-border)) 28%, var(--background-modifier-border));
+}
+
 .mapdown-node-content,
 .mapdown-node-editor {
 	width: max-content;
@@ -198,6 +242,12 @@
 
 .mapdown-node-content > :last-child {
 	margin-bottom: 0;
+}
+
+/* display formulas: MathJax's own 1em block margin leaves a gap inside a node; keep a small one
+   so a formula after text still sits on its own line */
+.mapdown-node .mapdown-node-content mjx-container[jax][display="true"] {
+	margin: 0.2em 0;
 }
 
 .mapdown-node-content p,
@@ -1327,4 +1377,9 @@
 
 .mapdown-embed-tip .mapdown-embed-tip-close {
 	flex: none;
+}
+
+/* Export completion notice (spec 2.3): clicking it opens the exported file. */
+.mapdown-export-done {
+	cursor: pointer;
 }

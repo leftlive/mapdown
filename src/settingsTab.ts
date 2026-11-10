@@ -20,7 +20,9 @@ import {
 	applySetting,
 	controlValue,
 	DEFAULT_PALETTE_KEY,
+	BRANCH_STYLE_VALUES,
 	DIRECTION_VALUES,
+	EXPORT_LOCATION_VALUES,
 	LINK_MODE_VALUES,
 	parseFontSize,
 	paletteKey,
@@ -104,6 +106,7 @@ export class MapdownSettingTab extends PluginSettingTab {
 						aliases: Object.keys(PALETTES),
 						render: (setting) => this.renderPalette(setting),
 					},
+					this.row('branchStyle', { type: 'dropdown', options: labelled('branch', BRANCH_STYLE_VALUES) }),
 					slider('nodeGlowSize', 0, 24, 1),
 					this.row('showTaskProgress', { type: 'toggle' }),
 				],
@@ -139,6 +142,12 @@ export class MapdownSettingTab extends PluginSettingTab {
 				type: 'group',
 				heading: t('set-group-embed'),
 				items: [this.row('embedMaps', { type: 'toggle' }), slider('embedHeight', 150, 1200, 50)],
+			},
+			{
+				type: 'group',
+				heading: t('set-group-export'),
+				// shown on phones too; the description says they always save next to the note
+				items: [this.row('exportLocation', { type: 'dropdown', options: labelled('location', EXPORT_LOCATION_VALUES) })],
 			},
 		];
 	}

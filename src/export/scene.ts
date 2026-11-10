@@ -3,9 +3,10 @@
 // scale, and the SVG string drawn straight from a layout result. No DOM and no
 // Obsidian here; the exporter (exporter.ts) supplies measuring, images and theme.
 
-import type { LayoutEdge, NodePlacement } from "../core/layout.ts";
+import { layout, type LayoutEdge, type LayoutInput, type LayoutResult, type NodePlacement } from "../core/layout.ts";
 import { findEmbeds } from "../core/mapCard.ts";
-import type { NodeKind } from "../core/types.ts";
+import type { LayoutDirection, NodeKind, Size } from "../core/types.ts";
+import type { BranchStyle } from "../settings.ts";
 import { MAP_GLYPH } from "../glyph.ts";
 import { CARD_GAP_EM, CARD_ICON_EM, CARD_PAD_EM } from "../view/measure.ts";
 
@@ -562,6 +563,8 @@ export interface Scene {
 	edges: LayoutEdge[];
 	rootId: string;
 	theme: ExportTheme;
+	/** Branch colour style (spec 5.12); absent means `line`. */
+	branchStyle?: BranchStyle;
 }
 
 /** Fallback padding and the border; per-node padding on SceneNode wins (measure.ts NODE_LEVELS). */
@@ -569,6 +572,100 @@ export interface ContentMetrics {
 	padX: number;
 	padY: number;
 	border: number;
+	/** Ascent and descent of the text font and the code font, per em (the exporter measures them); defaults when absent. */
+	text?: FontEm;
+	mono?: FontEm;
+}
+
+/** A font's ascent and descent as fractions of the font size. */
+export interface FontEm {
+	ascent: number;
+	descent: number;
+}
+
+/** Used when the fonts could not be measured: close to common system fonts. */
+export const DEFAULT_EM: Readonly<FontEm> = { ascent: 0.9, descent: 0.22 };
+
+/**
+ * The alphabetic baseline that centres a line of text on `centre` (spec 2.3).
+ * Chromium's `dominant-baseline: central` put the baseline (ascent - descent) / 2
+ * below the given y, with ascent and descent rounded to whole device pixels at
+ * the scale the SVG is drawn (`pixelScale`); other viewers ignore or misread
+ * that attribute, so the same baseline is written into `y` instead. Measured in
+ * Chromium 150, this matches the old rendering pixel for pixel at scales 1, 2 and 4.
+ */
+export function baselineY(centre: number, px: number, em: FontEm = DEFAULT_EM, pixelScale = 1): number {
+	const s = pixelScale > 0 ? pixelScale : 1;
+	return centre + (Math.round(em.ascent * px * s) - Math.round(em.descent * px * s)) / (2 * s);
+}
+
+// ---- branch colour style (spec 5.12) ---------------------------------
+
+type Rgb = [number, number, number];
+
+/** #rgb, #rrggbb (alpha ignored), rgb()/rgba() and hsl()/hsla() as sRGB 0-255; null for anything else. */
+function parseRgb(css: string): Rgb | null {
+	const s = css.trim().toLowerCase();
+	let m = /^#([0-9a-f]{3,8})$/.exec(s);
+	if (m) {
+		const h = m[1];
+		if (h.length === 3 || h.length === 4) return [0, 1, 2].map((i) => parseInt((h[i]).repeat(2), 16)) as Rgb;
+		if (h.length === 6 || h.length === 8) return [0, 2, 4].map((i) => parseInt(h.slice(i, i + 2), 16)) as Rgb;
+		return null;
+	}
+	m = /^rgba?\(\s*([\d.]+)(%?)[\s,]+([\d.]+)(%?)[\s,]+([\d.]+)(%?)/.exec(s);
+	if (m) {
+		const ch = (v: string | undefined, pct: string | undefined): number => (pct ? (Number(v) * 255) / 100 : Number(v));
+		return [ch(m[1], m[2]), ch(m[3], m[4]), ch(m[5], m[6])].map((v) => Math.max(0, Math.min(255, v))) as Rgb;
+	}
+	m = /^hsla?\(\s*([\d.]+)(?:deg)?[\s,]+([\d.]+)%[\s,]+([\d.]+)%/.exec(s);
+	if (m) {
+		const h = Number(m[1]) % 360;
+		const sat = Number(m[2]) / 100;
+		const l = Number(m[3]) / 100;
+		const a = sat * Math.min(l, 1 - l);
+		const f = (n: number): number => {
+			const k = (n + h / 30) % 12;
+			return Math.round(255 * (l - a * Math.max(-1, Math.min(k - 3, 9 - k, 1))));
+		};
+		return [f(0), f(8), f(4)];
+	}
+	return null;
+}
+
+/**
+ * `color-mix(in srgb, branch pct%, other)` as a concrete #rrggbb; null when either colour is not one
+ * parseRgb understands (the caller then keeps the unmixed look).
+ */
+export function mixBranch(branch: string, pct: number, other: string): string | null {
+	const a = parseRgb(branch);
+	const b = parseRgb(other);
+	if (!a || !b) return null;
+	const hex = (i: number): string => Math.round((a[i]) * (pct / 100) + (b[i]) * (1 - pct / 100)).toString(16).padStart(2, "0");
+	return `#${hex(0)}${hex(1)}${hex(2)}`;
+}
+
+/** Fill percentages (mixed with the background) and border percentages by level 1, 2, 3+; `strokeOnBg`: the border mixes with the background instead of the border colour. */
+const BRANCH_LOOK = {
+	border: { fill: null, stroke: [75, 55, 35], strokeOnBg: [false, false, false] },
+	tint: { fill: [22, 10, 5], stroke: [70, 45, 28], strokeOnBg: [true, false, false] },
+} as const;
+
+/** Edge widths: out of the root, elsewhere. `line` is 2 and 1.2, the others a little different (spec 5.12). */
+export function edgeWidths(style: BranchStyle | undefined): { root: number; other: number } {
+	return style === "border" || style === "tint" ? { root: 2.4, other: 1.6 } : { root: 2, other: 1.2 };
+}
+
+/** Fill and border of a non-root node with a branch colour; each null when the style leaves it as it is. */
+export function branchBox(style: BranchStyle | undefined, level: number, color: string, t: ExportTheme): { fill: string | null; stroke: string | null } {
+	if ((style !== "border" && style !== "tint") || !color) return { fill: null, stroke: null };
+	const look = BRANCH_LOOK[style];
+	const i = Math.max(0, Math.min(2, level - 1));
+	const fillPct = look.fill?.[i];
+	return {
+		fill: fillPct === undefined ? null : mixBranch(color, fillPct, t.nodeFill),
+		stroke: mixBranch(color, look.stroke[i], look.strokeOnBg[i] ? t.nodeFill : t.border),
+	};
 }
 
 function r2(n: number): string {
@@ -585,10 +682,12 @@ function xmlText(s: string): string {
 	return escapeXml(s.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F￾￿]/g, ""));
 }
 
-function segmentSvg(seg: Segment, baseX: number, node: SceneNode, theme: ExportTheme): string {
+/** `y`: the segment's own baseline, set when the line mixes the text and the code font. */
+function segmentSvg(seg: Segment, baseX: number, node: SceneNode, theme: ExportTheme, y: number | null): string {
 	const s = seg.style;
 	const lead = s.card ? cardExtra(node.fontPx) - CARD_PAD_EM * node.fontPx : 0;
 	const attrs: string[] = [`x="${r2(baseX + seg.x + lead)}"`];
+	if (y !== null) attrs.push(`y="${r2(y)}"`);
 	if (s.bold && node.weight < 700) attrs.push('font-weight="700"');
 	if (s.italic) attrs.push('font-style="italic"');
 	if (s.code) attrs.push(`font-family="${escapeXml(theme.monoFamily)}"`, `fill="${escapeXml(theme.codeText)}"`);
@@ -600,15 +699,15 @@ function segmentSvg(seg: Segment, baseX: number, node: SceneNode, theme: ExportT
 	return `<tspan ${attrs.join(" ")}>${xmlText(seg.text)}</tspan>`;
 }
 
-function contentSvg(item: ContentItem, ox: number, oy: number, node: SceneNode, theme: ExportTheme): string {
+function contentSvg(item: ContentItem, ox: number, oy: number, node: SceneNode, theme: ExportTheme, m: ContentMetrics, scale: number): string {
 	switch (item.type) {
 		case "rect":
 			return `<rect x="${r2(ox + item.x)}" y="${r2(oy + item.y)}" width="${r2(item.width)}" height="${r2(item.height)}" rx="2" fill="${escapeXml(item.fill)}"${item.stroke ? ` stroke="${escapeXml(item.stroke)}"` : ""}/>`;
 		case "image":
 			return `<image x="${r2(ox + item.x)}" y="${r2(oy + item.y)}" width="${r2(item.width)}" height="${r2(item.height)}" href="${escapeXml(item.href)}" preserveAspectRatio="none"/>`;
 		case "mono": {
-			const cy = oy + item.y + item.height / 2;
-			return `<text x="${r2(ox + item.x)}" y="${r2(cy)}" dominant-baseline="central" font-family="${escapeXml(theme.monoFamily)}" font-weight="400" fill="${escapeXml(theme.codeText)}" xml:space="preserve">${xmlText(item.text)}</text>`;
+			const y = baselineY(oy + item.y + item.height / 2, node.fontPx, m.mono, scale);
+			return `<text x="${r2(ox + item.x)}" y="${r2(y)}" font-family="${escapeXml(theme.monoFamily)}" font-weight="400" fill="${escapeXml(theme.codeText)}" xml:space="preserve">${xmlText(item.text)}</text>`;
 		}
 		case "line": {
 			if (item.segments.length === 0) return "";
@@ -623,22 +722,28 @@ function contentSvg(item: ContentItem, ox: number, oy: number, node: SceneNode, 
 				if (!fill) continue;
 				back.push(`<rect x="${r2(ox + seg.x - 1)}" y="${r2(oy + item.y + 1)}" width="${r2(seg.width + 2)}" height="${r2(item.height - 2)}" rx="2" fill="${escapeXml(fill)}"/>`);
 			}
-			const spans = item.segments.map((seg) => segmentSvg(seg, ox, node, theme)).join("");
-			return `${back.join("")}<text y="${r2(cy)}" dominant-baseline="central" xml:space="preserve">${spans}</text>`;
+			// Chromium centred each font on its own metrics; inline code keeps that with its own baseline
+			const textY = baselineY(cy, node.fontPx, m.text, scale);
+			const monoY = baselineY(cy, node.fontPx, m.mono, scale);
+			const mixed = textY !== monoY && item.segments.some((seg) => seg.style.code);
+			const spans = item.segments.map((seg) => segmentSvg(seg, ox, node, theme, mixed ? (seg.style.code ? monoY : textY) : null)).join("");
+			return `${back.join("")}<text y="${r2(textY)}" xml:space="preserve">${spans}</text>`;
 		}
 	}
 }
 
-function nodeSvg(node: SceneNode, scene: Scene, m: ContentMetrics, index: number): string {
+function nodeSvg(node: SceneNode, scene: Scene, m: ContentMetrics, index: number, scale: number): string {
 	const t = scene.theme;
 	const p = node.placement;
 	const out: string[] = [];
 	const radius = node.radius ?? (node.root ? t.rootRadius : t.radius);
-	const fill = node.root ? t.rootFill : t.nodeFill;
+	const look = node.root ? { fill: null, stroke: null } : branchBox(scene.branchStyle, node.level ?? 1, node.color, t);
+	const fill = look.fill ?? (node.root ? t.rootFill : t.nodeFill);
 	out.push(
-		`<rect x="${r2(p.x + 0.5)}" y="${r2(p.y + 0.5)}" width="${r2(p.width - 1)}" height="${r2(p.height - 1)}" rx="${r2(radius)}" fill="${escapeXml(fill)}" stroke="${escapeXml(t.border)}" stroke-width="1"/>`,
+		`<rect x="${r2(p.x + 0.5)}" y="${r2(p.y + 0.5)}" width="${r2(p.width - 1)}" height="${r2(p.height - 1)}" rx="${r2(radius)}" fill="${escapeXml(fill)}" stroke="${escapeXml(look.stroke ?? t.border)}" stroke-width="1"/>`,
 	);
-	if (!node.root && node.color && (node.level ?? 1) === 1) {
+	// the tint style has no colour wash on the side facing the parent (spec 5.12)
+	if (!node.root && node.color && (node.level ?? 1) === 1 && scene.branchStyle !== "tint") {
 		// First level, like styles.css: the branch colour is deepest along the side facing the parent and
 		// fades inwards; an ellipse centred 28 px in makes the front curve in towards that edge in the middle.
 		const id = `mapdown-wash-${index}`;
@@ -668,14 +773,14 @@ function nodeSvg(node: SceneNode, scene: Scene, m: ContentMetrics, index: number
 	const weight = node.weight;
 	out.push(`<g font-size="${node.fontPx}" font-weight="${weight}" fill="${escapeXml(t.text)}">`);
 	const task = node.task;
-	for (const item of node.content) out.push(contentSvg(item, ox + (task?.lead ?? 0), oy, node, t));
+	for (const item of node.content) out.push(contentSvg(item, ox + (task?.lead ?? 0), oy, node, t, m, scale));
 	if (task) out.push(checkboxSvg(ox, oy + task.cy - task.size / 2, task.size, task.done, t));
 	const pr = node.progress;
 	if (pr) {
 		const color = pr.complete ? (t.success ?? t.accent) : (t.muted ?? t.faint);
 		const x = p.x + p.width - m.border - (node.padX ?? m.padX);
 		out.push(
-			`<text x="${r2(x)}" y="${r2(oy + pr.cy)}" text-anchor="end" dominant-baseline="central" font-size="${r2(pr.fontPx)}" font-weight="400" fill="${escapeXml(color)}">${xmlText(pr.label)}</text>`,
+			`<text x="${r2(x)}" y="${r2(baselineY(oy + pr.cy, pr.fontPx, m.text, scale))}" text-anchor="end" font-size="${r2(pr.fontPx)}" font-weight="400" fill="${escapeXml(color)}">${xmlText(pr.label)}</text>`,
 		);
 	}
 	out.push("</g>");
@@ -690,7 +795,7 @@ function nodeSvg(node: SceneNode, scene: Scene, m: ContentMetrics, index: number
 		const color = node.color || t.faint;
 		out.push(
 			`<rect x="${r2(bx + 0.75)}" y="${r2(by + 0.75)}" width="${w - 1.5}" height="${h - 1.5}" rx="${r2(h / 2)}" fill="${escapeXml(t.nodeFill)}" stroke="${escapeXml(color)}" stroke-width="1.5"/>`,
-			`<text x="${r2(bx + w / 2)}" y="${r2(by + h / 2)}" text-anchor="middle" dominant-baseline="central" font-size="${fs}" font-weight="600" fill="${escapeXml(t.faint)}">${label}</text>`,
+			`<text x="${r2(bx + w / 2)}" y="${r2(baselineY(by + h / 2, fs, m.text, scale))}" text-anchor="middle" font-size="${fs}" font-weight="600" fill="${escapeXml(t.faint)}">${label}</text>`,
 		);
 	}
 	return out.join("");
@@ -721,7 +826,8 @@ function checkboxSvg(x: number, y: number, size: number, done: boolean, t: Expor
 
 /**
  * The scene as a standalone SVG document. `pixelScale` sets the intrinsic
- * width and height (the canvas draws it at that size, so text stays sharp).
+ * width and height (the canvas draws it at that size, so text stays sharp)
+ * and the pixel grid text baselines are rounded to.
  */
 export function buildSvg(scene: Scene, metrics: ContentMetrics, pixelScale = 1): string {
 	const b = scene.box;
@@ -732,15 +838,51 @@ export function buildSvg(scene: Scene, metrics: ContentMetrics, pixelScale = 1):
 		`<rect x="${b.x}" y="${b.y}" width="${b.width}" height="${b.height}" fill="${escapeXml(t.background)}"/>`,
 		'<g fill="none" stroke-linecap="round">',
 	];
+	const widths = edgeWidths(scene.branchStyle);
 	for (const e of scene.edges) {
 		const d = `M ${r2(e.from.x)} ${r2(e.from.y)} C ${r2(e.c1.x)} ${r2(e.c1.y)}, ${r2(e.c2.x)} ${r2(e.c2.y)}, ${r2(e.to.x)} ${r2(e.to.y)}`;
-		const width = e.parentId === scene.rootId ? 2 : 1.2;
+		const width = e.parentId === scene.rootId ? widths.root : widths.other;
 		out.push(`<path d="${d}" stroke="${escapeXml(e.color)}" stroke-width="${width}"/>`);
 	}
 	out.push("</g>");
-	scene.nodes.forEach((node, i) => out.push(nodeSvg(node, scene, metrics, i)));
+	scene.nodes.forEach((node, i) => out.push(nodeSvg(node, scene, metrics, i, pixelScale)));
 	out.push("</svg>");
 	return out.join("");
+}
+
+/**
+ * A CSS font-family list without the families Obsidian leaves as `??` (unset
+ * override variables) and without empty entries; null-ish input gives `fallback`.
+ */
+export function cleanFontStack(stack: string, fallback: string): string {
+	const parts: string[] = [];
+	let cur = "";
+	let quote = "";
+	for (const ch of stack) {
+		if (quote) {
+			cur += ch;
+			if (ch === quote) quote = "";
+		} else if (ch === '"' || ch === "'") {
+			cur += ch;
+			quote = ch;
+		} else if (ch === ",") {
+			parts.push(cur);
+			cur = "";
+		} else cur += ch;
+	}
+	parts.push(cur);
+	const kept = parts.map((p) => p.replace(/\s+/g, " ").trim()).filter((p) => p !== "" && p.replace(/^["']|["']$/g, "").trim() !== "??");
+	return kept.length ? kept.join(", ") : fallback;
+}
+
+/**
+ * The SVG as a standalone file (spec 2.3): XML declaration, and image links
+ * also written as `xlink:href` so editors that only know SVG 1.1 show them.
+ */
+export function svgDocument(svg: string): string {
+	const root = svg.replace(/^<svg /, '<svg xmlns:xlink="http://www.w3.org/1999/xlink" ');
+	const linked = root.replace(/(<image [^>]*?) href="/g, '$1 xlink:href="');
+	return '<?xml version="1.0" encoding="UTF-8" standalone="no"?>\n' + linked + "\n";
 }
 
 /** Self-contained HTML page holding the SVG inline (images are data URLs already). */
@@ -773,6 +915,12 @@ export interface ContentInput {
 	blocks: Block[];
 	/** Content box width (node width minus padding and border). */
 	innerWidth: number;
+	/**
+	 * Width at which text lines wrap; defaults to `innerWidth`. The exporter passes
+	 * the content box's max width (measure.ts `textWrapWidth`), as on screen the
+	 * box is as wide as its text and only that max width breaks a line.
+	 */
+	wrapWidth?: number;
 	fontPx: number;
 	lineHeight: number;
 	measure: Measure;
@@ -786,6 +934,8 @@ export interface ContentInput {
 export interface ContentResult {
 	items: ContentItem[];
 	height: number;
+	/** Width the content takes: widest line, image, table or code line (code with its inset). */
+	width: number;
 	/** Images that were missing and drawn as their link text. */
 	missingImages: number;
 	/** Formulas drawn as source. */
@@ -799,12 +949,15 @@ export function layoutContent(input: ContentInput): ContentResult {
 	let y = 0;
 	let missing = 0;
 	let formulas = 0;
+	let width = 0;
+	const wrapWidth = input.wrapWidth ?? input.innerWidth;
 	// a card is its label plus padding, icon and gap
 	const measure: Measure = (s, st) => input.measure(s, st) + (st.card ? cardExtra(input.fontPx) : 0);
 	const pushLines = (runs: Run[]): void => {
 		formulas += runs.filter((r) => r.style.math).length;
-		for (const line of wrapRuns(runs, input.innerWidth, measure)) {
+		for (const line of wrapRuns(runs, wrapWidth, measure)) {
 			items.push({ type: "line", y, height: lh, segments: line.segments });
+			width = Math.max(width, line.width);
 			y += lh;
 		}
 	};
@@ -826,6 +979,7 @@ export function layoutContent(input: ContentInput): ContentResult {
 				w = cap;
 			}
 			items.push({ type: "image", x: 0, y, width: w, height: h, href: img.href });
+			width = Math.max(width, w);
 			y += h;
 		} else if (block.type === "code") {
 			const start = y;
@@ -833,6 +987,7 @@ export function layoutContent(input: ContentInput): ContentResult {
 			for (const raw of block.lines) {
 				for (const part of breakChars(raw.replace(/\t/g, "    "), input.innerWidth - 8, input.measureMono)) {
 					rows.push({ text: part, y });
+					width = Math.max(width, input.measureMono(part) + 8);
 					y += lh;
 				}
 			}
@@ -856,9 +1011,10 @@ export function layoutContent(input: ContentInput): ContentResult {
 				y += lh;
 			});
 			items.push({ type: "rect", x: 0, y: start, width: total, height: y - start, fill: "none", stroke: input.theme.border });
+			width = Math.max(width, total);
 		}
 	}
-	return { items, height: y, missingImages: missing, formulas };
+	return { items, height: y, width, missingImages: missing, formulas };
 }
 
 /** Splits `text` between characters so each part fits `max` (code lines). */
@@ -879,4 +1035,48 @@ export function breakChars(text: string, max: number, measure: (s: string) => nu
 	}
 	parts.push(cur);
 	return parts;
+}
+
+// ---------------------------------------------------------------- export layout
+
+/**
+ * The layout input that gives `lay` again: the nodes it placed, in the tree
+ * order `childrenOf` returns (children `lay` did not place are left out, as a
+ * collapsed node's are), each at its placed size unless `sizes` has another.
+ */
+export function layoutInputOf(lay: LayoutResult, childrenOf: (id: string) => readonly string[], sizes: ReadonlyMap<string, Size>): LayoutInput | null {
+	const rootId = lay.nodes.keys().next().value;
+	if (rootId === undefined) return null;
+	const build = (id: string): LayoutInput => {
+		const p = lay.nodes.get(id) as NodePlacement;
+		const size = sizes.get(id) ?? { width: p.width, height: p.height };
+		const children = childrenOf(id)
+			.filter((c) => lay.nodes.has(c))
+			.map(build);
+		return { id, size, collapsed: false, children };
+	};
+	return build(rootId);
+}
+
+/**
+ * The layout the export draws (spec 2.3): `lay` itself when every size in `sizes`
+ * matches its placement, otherwise a fresh layout (spec section 9) with those
+ * sizes and the same direction and palette the screen used. The displayed map
+ * is never touched.
+ */
+export function exportLayout(
+	lay: LayoutResult,
+	childrenOf: (id: string) => readonly string[],
+	sizes: ReadonlyMap<string, Size>,
+	direction: LayoutDirection,
+	palette: readonly string[],
+): LayoutResult {
+	let changed = false;
+	for (const [id, size] of sizes) {
+		const p = lay.nodes.get(id);
+		if (p && (p.width !== size.width || p.height !== size.height)) changed = true;
+	}
+	if (!changed) return lay;
+	const input = layoutInputOf(lay, childrenOf, sizes);
+	return input ? layout(input, direction, palette) : lay;
 }

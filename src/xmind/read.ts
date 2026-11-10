@@ -35,6 +35,7 @@ export class XmindImportError extends Error {
 }
 
 export const NOTE_PREFIX = '📝 ';
+/** The old import prefix; export still reads it (notes written by earlier versions). */
 export const TASK_DONE = '✅';
 
 // The parts of a topic both file formats provide.
@@ -127,12 +128,15 @@ function topicText(raw: RawTopic) {
         title = `[${label}](${href.replace(/[()\s]/g, encodeURIComponent)})`;
     }
     const prefix: string[] = [];
+    // 1.2: task progress comes back as a checkbox, ahead of the other prefixes
+    if (raw.markers.includes('task-done')) {
+        prefix.push('[x]');
+    } else if (raw.markers.some((m) => m.startsWith('task-'))) {
+        prefix.push('[ ]');
+    }
     const priority = raw.markers.map((m) => /^priority-(\d+)$/.exec(m)).find(Boolean);
     if (priority) {
         prefix.push(`(P${priority[1]})`);
-    }
-    if (raw.markers.includes('task-done')) {
-        prefix.push(TASK_DONE);
     }
     const labels = raw.labels.map((l) => l.trim()).filter(Boolean).map((l) => `\`${l.replace(/`/g, '')}\``);
     return [...prefix, title, ...labels].filter(Boolean).join(' ');

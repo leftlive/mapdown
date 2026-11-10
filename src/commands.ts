@@ -220,6 +220,8 @@ export const COMMANDS: MapCommand[] = [
 	{ id: 'Undo', name: 'Undo', need: 'map', palette: true, run: (v) => v.undo() },
 	{ id: 'Redo', name: 'Redo', need: 'map', palette: true, run: (v) => v.redo() },
 	// export (spec 2.2, 2.3): LQ = scale 1, plain = 2, HQ = 4
+	{ id: 'export-svg', name: 'export-svg', need: 'map', palette: true, run: (v) => void v.exportImage('svg', 1) },
+	{ id: 'export-pdf', name: 'export-pdf', need: 'map', palette: true, run: (v) => void v.exportImage('pdf', 4) },
 	{ id: 'Export to html', name: 'Export to html', need: 'map', palette: true, run: (v) => void v.exportImage('html', 1) },
 	{ id: 'Export to JPEG (LQ)', name: 'Export to JPEG (LQ)', need: 'map', palette: true, run: (v) => void v.exportImage('jpeg', 1) },
 	{ id: 'Export to PNG (LQ)', name: 'Export to PNG (LQ)', need: 'map', palette: true, run: (v) => void v.exportImage('png', 1) },

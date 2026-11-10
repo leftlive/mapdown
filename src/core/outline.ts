@@ -16,6 +16,24 @@ export interface OutlineSource<T> {
 const CODE_FENCE = /^(`{3,}|~{3,})/;
 const TABLE_DELIMITER = /^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$/;
 
+/**
+ * Text holding a closed `$$ ... $$` span that crosses lines (contract 6.3,
+ * "multi-line formula"). An unclosed `$$` does not count.
+ */
+export function hasMultilineFormula(text: string): boolean {
+	const spans = text.match(/\$\$[\s\S]*?\$\$/g);
+	return !!spans && spans.some((s) => s.includes('\n'));
+}
+
+/** Text of a multi-line formula as real lines: `pad` in front of every line after the first. */
+export function formulaLines(text: string, eol: string, pad: string): string {
+	return text
+		.replace(/\r/g, '')
+		.split('\n')
+		.map((l, i) => (i === 0 || l === '' ? l : pad + l))
+		.join(eol);
+}
+
 export function clampHeadLevel(value: unknown): number {
 	const level = Number(value);
 	return Number.isNaN(level) ? 1 : Math.max(0, Math.min(6, Math.trunc(level)));
@@ -106,7 +124,8 @@ export function writeOutline<T>(
 			} else if (!text.includes('\n')) {
 				md += `${space}- ${item}${ending}${eol}`;
 			} else {
-				md += `${space}- ${item.replace(/\n/g, '<br>')}${ending}${eol}`;
+				const multi = hasMultilineFormula(text);
+				md += `${space}- ${multi ? formulaLines(item, eol, space + '  ') : item.replace(/\n/g, '<br>')}${ending}${eol}`;
 			}
 		}
 		const chunk = md.slice(chunkStart);
