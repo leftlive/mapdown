@@ -7,7 +7,7 @@ import { t, type StringKey } from '../i18n.ts';
 import type { ExportLocation } from '../settings.ts';
 
 /** File extensions the exports write. */
-export type ExportExt = 'png' | 'jpg' | 'svg' | 'pdf' | 'html' | 'xmind';
+export type ExportExt = 'png' | 'jpg' | 'svg' | 'pdf' | 'html' | 'xmind' | 'canvas';
 
 /** One `id` for every format, so the dialog opens in the folder used last time. At most 32 of [A-Za-z0-9_-]. */
 export const PICKER_ID = 'mapdown-export';
@@ -19,6 +19,7 @@ const FILE_TYPES: Record<ExportExt, { description: string; mime: string; exts: s
 	pdf: { description: 'PDF', mime: 'application/pdf', exts: ['.pdf'] },
 	html: { description: 'HTML', mime: 'text/html', exts: ['.html'] },
 	xmind: { description: 'XMind', mime: 'application/vnd.xmind.workbook', exts: ['.xmind'] },
+	canvas: { description: 'Canvas', mime: 'application/json', exts: ['.canvas'] },
 };
 
 export interface PickerOptions {
@@ -63,6 +64,8 @@ export interface DoneExtras {
 	scaleUsed?: number | null;
 	/** Saved next to the note because the dialog was not available. */
 	fellBack?: boolean;
+	/** Collapsed branches were exported expanded (canvas export). */
+	expanded?: boolean;
 }
 
 /** The completion notice: `heading` with what was written (a vault path or a file name), then the extras. */
@@ -72,6 +75,7 @@ export function doneLines(heading: StringKey, shown: string, extras: DoneExtras 
 	if (extras.scaleUsed !== undefined && extras.scaleUsed !== null) lines.push(t('export-scale-reduced', extras.scaleUsed));
 	if (extras.formulas) lines.push(t('export-math-source', extras.formulas));
 	if (extras.missing) lines.push(t('export-images-missing', extras.missing));
+	if (extras.expanded) lines.push(t('export-canvas-expanded'));
 	return lines;
 }
 

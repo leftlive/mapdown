@@ -21,6 +21,7 @@ import {
 	joinSteps,
 	levelFromNode,
 	levelInSubtree,
+	moveOpFor,
 	removeLineBreaks,
 	showToLevel,
 	sidesOf,
@@ -116,9 +117,9 @@ function moveSide(v: MapView, arrow: 'left' | 'right'): void {
 		return;
 	}
 	if (node === v.session.doc.root) return;
-	const side = sidesOf(v.session.doc.root, v.direction()).get(node.id);
-	const outdent = (side === 'right' && arrow === 'left') || (side === 'left' && arrow === 'right');
-	moveBy(v, outdent ? 'outdent' : 'indent');
+	const dir = v.direction();
+	const side = sidesOf(v.session.doc.root, dir).get(node.id) ?? 'root';
+	moveBy(v, moveOpFor(arrow, side, dir));
 }
 
 function moveBy(v: MapView, how: 'up' | 'down' | 'indent' | 'outdent'): void {
@@ -222,6 +223,8 @@ export const COMMANDS: MapCommand[] = [
 	// export (spec 2.2, 2.3): LQ = scale 1, plain = 2, HQ = 4
 	{ id: 'export-svg', name: 'export-svg', need: 'map', palette: true, run: (v) => void v.exportImage('svg', 1) },
 	{ id: 'export-pdf', name: 'export-pdf', need: 'map', palette: true, run: (v) => void v.exportImage('pdf', 4) },
+	// spec 5.13; unavailable while presenting (see `available`)
+	{ id: 'start-presentation', name: 'start-presentation', need: 'map', palette: true, run: (v) => v.startPresentation() },
 	{ id: 'Export to html', name: 'Export to html', need: 'map', palette: true, run: (v) => void v.exportImage('html', 1) },
 	{ id: 'Export to JPEG (LQ)', name: 'Export to JPEG (LQ)', need: 'map', palette: true, run: (v) => void v.exportImage('jpeg', 1) },
 	{ id: 'Export to PNG (LQ)', name: 'Export to PNG (LQ)', need: 'map', palette: true, run: (v) => void v.exportImage('png', 1) },
@@ -311,8 +314,8 @@ export const COMMANDS: MapCommand[] = [
 	},
 	{ id: 'Toggle expand/collapse node', name: 'Toggle expand/collapse node', need: 'selection', palette: true, run: toggleCollapse },
 	{ id: 'toggle-task', name: 'toggle-task', need: 'selection', palette: true, run: toggleTasks },
-	{ id: 'Move the current node above', name: 'Move the current node above', need: 'selection', palette: true, run: (v) => moveBy(v, 'up') },
-	{ id: 'Move the current node below', name: 'Move the current node below', need: 'selection', palette: true, run: (v) => moveBy(v, 'down') },
+	{ id: 'Move the current node above', name: 'Move the current node above', need: 'selection', palette: true, run: (v) => moveBy(v, moveOpFor('up', 'root', v.direction())) },
+	{ id: 'Move the current node below', name: 'Move the current node below', need: 'selection', palette: true, run: (v) => moveBy(v, moveOpFor('down', 'root', v.direction())) },
 	{ id: 'Move the current node left', name: 'Move the current node left', need: 'selection', palette: true, run: (v) => moveSide(v, 'left') },
 	{ id: 'Move the current node right', name: 'Move the current node right', need: 'selection', palette: true, run: (v) => moveSide(v, 'right') },
 	{
@@ -401,6 +404,8 @@ export const COMMANDS: MapCommand[] = [
 		},
 	},
 	{ id: 'key:escape', name: 'Cancel edit', need: 'map', palette: false, run: (v) => v.escape() },
+	// spec 2.2, 2.3 "白板导出"
+	{ id: 'export-canvas', name: 'export-canvas', need: 'map', palette: true, run: (v) => void v.exportCanvas() },
 ];
 
 function adopt(v: MapView, which: 'next' | 'all'): void {
@@ -430,6 +435,8 @@ export const COMMAND_BY_ID = new Map(COMMANDS.map((c) => [c.id, c]));
 /** Whether `command` can run in `view` now. */
 export function available(command: MapCommand, view: MapView): boolean {
 	if (!view.canEdit()) return false;
+	// presenting is read-only (spec 5.13): no command runs, and starting again does nothing
+	if (view.isPresenting()) return false;
 	if (command.need === 'editing') return view.isEditing();
 	if (command.need === 'selection') return view.session.view.selection.primary !== null || view.isEditing();
 	return true;

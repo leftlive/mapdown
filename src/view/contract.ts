@@ -3,6 +3,7 @@
 // the e2e tests rely on. Change only together with every user.
 
 import type { LayoutResult } from '../core/layout.ts';
+import type { PresentFrame, PresentLook } from '../core/presentation.ts';
 import type { TaskCount } from '../core/tasks.ts';
 import type { BranchStyle } from '../settings.ts';
 import type { LayoutDirection, MapNode, Point } from '../core/types.ts';
@@ -42,7 +43,7 @@ export const DOM = {
 	editor: 'mapdown-node-editor',
 	/** The single SVG holding every edge path. */
 	edges: 'mapdown-edges',
-	/** Toolbar; each button has `data-action` (undo, redo, zoom-in, zoom-out, fit, new-map, search, export). */
+	/** Toolbar; each button has `data-action` (undo, redo, zoom-in, zoom-out, fit, present, new-map, search, export). */
 	toolbar: 'mapdown-toolbar',
 	actionAttr: 'data-action',
 	/** The node menu (spec 5.2, one node selected), rendered inside the view; items carry data-action add-child, delete, focus, insert-image. */
@@ -95,6 +96,35 @@ export const DOM = {
 	focusMode: 'is-focus-mode',
 	/** On the focus node. */
 	focusRoot: 'is-focus-root',
+	/**
+	 * On the view's contentEl while presenting (spec 5.13). The toolbar, minimap, search bar, node
+	 * toolbar, multi-selection bar, grid dots and selection ring hide; collapse dots and badges stay.
+	 */
+	presenting: 'is-presenting',
+	/** On node elements and edge paths (an edge as its child node) outside the current node's neighbourhood: faded to 15%. */
+	presentDim: 'is-present-dim',
+	/** Ring on the current node, and on a clicked leaf shown from its parent's step. */
+	presentCurrent: 'is-present-current',
+	presentLeaf: 'is-present-leaf',
+	/**
+	 * Progress bar at the bottom while presenting: buttons with data-action present-prev, present-next
+	 * (disabled at the ends) and present-overview (`is-active` on the overview), the "3 / 12" or
+	 * "Overview" text `presentCount`, the track's filled part `presentFill`, and the level select `presentLevel`
+	 * (values all, 1, 2, 3).
+	 */
+	presentBar: 'mapdown-present-bar',
+	presentCount: 'mapdown-present-count',
+	presentFill: 'mapdown-present-fill',
+	presentLevel: 'mapdown-present-level',
+	/**
+	 * Breadcrumb at the top while presenting: segments `presentCrumb` with `data-id` (the last one the
+	 * current node, or the ringed leaf), "…" `presentCrumbMore`; on the overview a hint text instead.
+	 */
+	presentCrumbs: 'mapdown-present-crumbs',
+	presentCrumb: 'mapdown-present-crumb',
+	presentCrumbMore: 'mapdown-present-crumb-more',
+	/** Top right while presenting: the "Esc to exit" hint (desktop), or a button with data-action present-exit (phones, tablets). */
+	presentHint: 'mapdown-present-hint',
 	/** The Mapdown button in a Markdown view's header (spec 5.5). */
 	headerAction: 'mapdown-header-action',
 	splitAction: 'mapdown-split-action',
@@ -182,7 +212,14 @@ export interface RenderEvents {
 	viewportChange(): void;
 	/** Nodes were laid out again (also after sizes settled on a later frame). */
 	layoutChange?(): void;
+	/** Presenting (spec 5.13): a one-finger horizontal swipe; left is the next step. */
+	swipe?(dir: 'next' | 'prev'): void;
+	/** Presenting (spec 5.13): a click or tap on a node, faded ones, links, cards and checkboxes included. */
+	presentClick?(id: string): void;
 }
+
+/** What the presentation camera frames (spec 5.13): node ids (all laid-out nodes when null) and the zoom limits. */
+export type PresentCamera = PresentFrame;
 
 /** Services the renderer gets from Obsidian through the controller. */
 export interface RenderHost {
@@ -236,7 +273,23 @@ export interface MapRenderer {
 	/** Put the world point `p` in the middle of the view (minimap jump). */
 	centerOnPoint(p: Point): void;
 	zoomBy(factor: number, at?: Point): void;
-	fit(): void;
+	fit(maxZoom?: number): void;
+	/**
+	 * Presentation mode (spec 5.13): the look around the current node, null to end it. Only classes
+	 * change (no new nodes; nodes drawn later get them too). While set, selection and search highlights
+	 * are not drawn; a click or tap on a node is `presentClick` (nothing selects, edits, drags, opens a
+	 * link or card or ticks a task); collapse dots and badges still `toggleCollapse`; a drag pans, a
+	 * one-finger touch swipe is `swipe`. Ending it puts pan and zoom back as they were when it began
+	 * (kept centred if the view size changed meanwhile or changes later, e.g. leaving full screen).
+	 * Call `update` after ending it to draw the selection again.
+	 */
+	setPresentation(look: PresentLook | null): void;
+	/**
+	 * Point the presentation camera at `camera.camera` (the whole map when null) inside the usable area with the "fit" margin: a
+	 * 400 ms ease-in-out flight when `animate` (none with reduced motion), cutting short a flight
+	 * in progress. Re-aimed without animation when the view resizes, until `setPresentation(null)`.
+	 */
+	presentCamera(camera: PresentCamera, animate: boolean): void;
 	/** Read-only maps only: true lets the plain wheel pan the map (an active embed, spec 5.10) instead of scrolling the page. */
 	wheelPan: boolean;
 	readonly zoom: number;

@@ -87,7 +87,7 @@ export function installImageDrop(view: MapView): void {
 		return node?.getAttribute(DOM.nodeIdAttr) ?? null;
 	};
 	view.registerDomEvent(el, 'dragover', (evt) => {
-		if (!view.canEdit()) return;
+		if (!view.canEdit() || view.isPresenting()) return;
 		const vault = draggedVaultImages(view.app).length > 0;
 		if (!vault && !mayHoldImage(evt.dataTransfer)) return;
 		const onNode = nodeId(evt.target) !== null;
@@ -100,7 +100,7 @@ export function installImageDrop(view: MapView): void {
 	}, { capture: true });
 	// Capture: runs before the node editor's own drop handler, which then leaves the event alone.
 	view.registerDomEvent(el, 'drop', (evt) => {
-		if (!view.canEdit()) return;
+		if (!view.canEdit() || view.isPresenting()) return;
 		const files = imageFiles(evt.dataTransfer);
 		const vault = files.length === 0 ? draggedVaultImages(view.app) : [];
 		if (files.length === 0 && vault.length === 0) return;

@@ -77,7 +77,9 @@ export interface MapNode {
 export interface MindmarkState {
 	version: number;
 	collapsed: string[];
-	/** Other fields of the state object, kept as-is when writing. */
+	/** Per-map layout direction (spec 9.2, contract 3); absent when following the default or unrecognised. */
+	layout?: LayoutDirection;
+	/** Other fields of the state object, kept as-is when writing (including an unrecognised `layout`). */
 	extra: Record<string, unknown>;
 }
 
@@ -116,7 +118,7 @@ export interface EditResult {
 	inverse: TextEdit[];
 }
 
-export type LayoutDirection = 'mindmap' | 'right' | 'left' | 'clockwise';
+export type LayoutDirection = 'mindmap' | 'right' | 'left' | 'clockwise' | 'down';
 
 export interface Size {
 	width: number;

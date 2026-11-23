@@ -10,7 +10,7 @@ export const FONT_SIZE_MAX = 72;
 /** The palette choice that means "strokeArray not set". */
 export const DEFAULT_PALETTE_KEY = 'default';
 
-export const DIRECTION_VALUES = ['mindmap', 'right', 'left', 'clockwise'] as const;
+export const DIRECTION_VALUES = ['mindmap', 'right', 'left', 'clockwise', 'down'] as const;
 export const LINK_MODE_VALUES = ['current', 'tab', 'window'] as const;
 export const BRANCH_STYLE_VALUES = ['line', 'border', 'tint'] as const;
 export const EXPORT_LOCATION_VALUES = ['ask', 'note'] as const;

@@ -1,7 +1,7 @@
 // View state over a MapNode tree: collapse, search expansion, focus mode and
 // selection. Everything is immutable; functions return new ViewState values.
 // Node ids are MapNode.id; the tree is passed in wherever structure matters.
-import type { Frontmatter, MapNode, TextEdit } from './types.ts';
+import type { Frontmatter, LayoutDirection, MapNode, TextEdit } from './types.ts';
 
 export interface Selection {
 	/** Selected ids in the order they were selected. */
@@ -306,24 +306,58 @@ function detectEol(text: string): '\n' | '\r\n' {
 	return i > 0 && text[i - 1] === '\r' ? '\r\n' : '\n';
 }
 
+const hasOwn = (obj: Record<string, unknown>, key: string): boolean => Object.prototype.hasOwnProperty.call(obj, key);
+
+/**
+ * Formats the JSON value of `mindmark-state` (contract 3.2.1): field order is
+ * `version`, `collapsed`, `layout` (when present), then any other fields.
+ * `layout`: a direction writes/replaces it; `null` drops it; `undefined` keeps
+ * `currentLayout` (or an unrecognised `extra.layout`).
+ */
+export function formatStateJson(
+	collapsed: readonly string[] = [],
+	layout?: LayoutDirection | null,
+	extra: Record<string, unknown> = {},
+	currentLayout?: LayoutDirection,
+): string {
+	const out: Record<string, unknown> = { version: 2, collapsed: [...collapsed] };
+	if (layout !== null) {
+		if (layout !== undefined) out.layout = layout;
+		else if (currentLayout !== undefined) out.layout = currentLayout;
+		else if (hasOwn(extra, 'layout')) out.layout = extra['layout'];
+	}
+	for (const [k, v] of Object.entries(extra)) {
+		if (k === 'version' || k === 'collapsed' || k === 'layout') continue;
+		Object.defineProperty(out, k, { value: v, enumerable: true, writable: true, configurable: true });
+	}
+	return JSON.stringify(out);
+}
+
 /**
  * Edits that write the `mindmark-state` line (version 2) and nothing else in
  * the frontmatter. Returns [] when the stored state already means the same
- * thing (version 2, same set of ids; spelling and key order don't matter), or
- * when the existing state is unsupported or invalid (the file is left alone).
- * Call it only after the user changed the collapse state: with no state line,
- * any call writes one.
+ * thing (version 2, same set of ids, same layout; spelling and key order don't
+ * matter), or when the existing state is unsupported or invalid (the file is
+ * left alone). `layout`: direction writes/replaces it, `null` removes it,
+ * `undefined` keeps whatever the file already has (including an unrecognised value).
  */
 export function stateLineEdit(
 	text: string,
 	frontmatter: Frontmatter | null,
 	collapsedIds: readonly string[],
+	layout?: LayoutDirection | null,
 ): TextEdit[] {
 	if (frontmatter?.stateError) return [];
 	const current = frontmatter?.stateRange ? frontmatter.state : null;
-	if (current && current.version === 2 && sameIds(current.collapsed, collapsedIds)) return [];
+	const layoutUnchanged =
+		layout === undefined
+			? true
+			: layout === null
+				? current !== null && current.layout === undefined && !hasOwn(current.extra, 'layout')
+				: current !== null && current.layout === layout;
+	if (current && current.version === 2 && sameIds(current.collapsed, collapsedIds) && layoutUnchanged) return [];
 	const extra = frontmatter?.state?.extra ?? {};
-	const line = `${STATE_KEY}: ${JSON.stringify({ ...extra, version: 2, collapsed: [...collapsedIds] })}`;
+	const line = `${STATE_KEY}: ${formatStateJson(collapsedIds, layout, extra, frontmatter?.state?.layout)}`;
 	const eol = detectEol(text);
 
 	if (!frontmatter) {

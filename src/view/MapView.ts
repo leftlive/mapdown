@@ -13,8 +13,9 @@
 
 import { Annotation, Transaction, type ChangeSpec } from '@codemirror/state';
 import type { EditorView } from '@codemirror/view';
-import { MarkdownRenderer, MarkdownView, Notice, Platform, Scope, TextFileView, setIcon, type App, type Component, type HoverParent, type HoverPopover, type Menu, type TFile, type WorkspaceLeaf } from 'obsidian';
+import { MarkdownRenderer, MarkdownView, Menu, Notice, Platform, Scope, TextFileView, setIcon, type App, type Component, type HoverParent, type HoverPopover, type TFile, type WorkspaceLeaf } from 'obsidian';
 import { DEFAULT_PALETTE } from '../core/layout.ts';
+import { presentKeyAction } from '../core/presentation.ts';
 import { taskProgress, type TaskCount } from '../core/tasks.ts';
 import { childPosition, findNodeAt, insertNodes, insertSibling, moveNodes, pasteMarkdown, setText, type NodeInput, type Position } from '../core/ops.ts';
 import { parseDocument } from '../core/parse.ts';
@@ -58,6 +59,7 @@ import { availablePath, fileNameFromRoot, folderOf, writeSafetyCopy } from '../s
 import type MapdownPlugin from '../main.ts';
 import { DOM, type EditorHandle, type MapRenderer, type Modifiers, type DropPlace, type RenderEvents, type RenderHost, type RenderModel } from './contract.ts';
 import type { MapdownSettings } from '../settings.ts';
+import { DIRECTION_VALUES } from '../settingsModel.ts';
 import { MobileToolbar } from './mobileToolbar.ts';
 import { MultiActionBar } from './multiActionBar.ts';
 import { isMultiSelection } from './multiActions.ts';
@@ -65,15 +67,20 @@ import { addImageFiles, installImageDrop, openImagePicker } from './nodeImages.t
 import { appendLine, extensionForMime, pastedImageName } from '../nodeImage.ts';
 import { createRenderer } from './renderer.ts';
 import { SearchBar } from './search.ts';
+import { Presentation } from './presentation.ts';
 import type { Viewport } from './viewport.ts';
 import { exportMap, showExportMenu, type ExportFormat } from '../export/exporter.ts';
+import { exportCanvas } from '../export/canvasExport.ts';
 
 export const VIEW_TYPE = 'mindmapViewUpgraded';
 
 /** The parts of a render model that come from the settings (map views and embedded maps). */
-export function settingsLook(s: MapdownSettings): Pick<RenderModel, 'direction' | 'palette' | 'fontSize' | 'nodeMaxWidth' | 'nodeGlowSize' | 'branchStyle' | 'placeholder'> {
+export function settingsLook(
+	s: MapdownSettings,
+	direction: LayoutDirection = s.layoutDirect,
+): Pick<RenderModel, 'direction' | 'palette' | 'fontSize' | 'nodeMaxWidth' | 'nodeGlowSize' | 'branchStyle' | 'placeholder'> {
 	return {
-		direction: s.layoutDirect,
+		direction,
 		palette: s.strokeArray && s.strokeArray.length > 0 ? s.strokeArray : DEFAULT_PALETTE,
 		fontSize: s.fontSize,
 		nodeMaxWidth: s.nodeMaxWidth,
@@ -162,6 +169,15 @@ export class MapView extends TextFileView implements KeyTarget, HoverParent {
 	private syncOnLoad = false;
 	/** Exports in progress; closing the view cancels them quietly. */
 	private readonly exports = new Set<AbortController>();
+	/** Presentation mode (spec 5.13) and the selection to restore when it ends (the renderer restores pan and zoom). */
+	private presentation: Presentation | null = null;
+	private presentSaved: { ids: string[]; primary: string | null } | null = null;
+	/** The presentation's fold state (spec 5.13 "临时展开"): starts as the file's, never saved, dropped at the end. */
+	private presentHidden: Set<string> | null = null;
+	/** The next render comes from a presentation fold toggle: the camera is aimed again. */
+	private presentAim = false;
+	/** Until then (ms), node sizes settling after a presentation fold re-aim the camera. */
+	private presentSettle = 0;
 
 	constructor(leaf: WorkspaceLeaf, plugin: MapdownPlugin) {
 		super(leaf);
@@ -217,7 +233,7 @@ export class MapView extends TextFileView implements KeyTarget, HoverParent {
 	}
 
 	direction(): LayoutDirection {
-		return this.plugin.settings.layoutDirect;
+		return this.session.doc.frontmatter?.state?.layout ?? this.plugin.settings.layoutDirect;
 	}
 
 	// ------------------------------------------------------------ lifecycle
@@ -252,6 +268,7 @@ export class MapView extends TextFileView implements KeyTarget, HoverParent {
 	}
 
 	async onClose(): Promise<void> {
+		this.endPresentation();
 		for (const c of this.exports) c.abort();
 		this.exports.clear();
 		this.commitEdit();
@@ -270,6 +287,7 @@ export class MapView extends TextFileView implements KeyTarget, HoverParent {
 	}
 
 	async onUnloadFile(file: TFile): Promise<void> {
+		this.endPresentation();
 		this.commitEdit();
 		this.flushEditorChanges();
 		await super.onUnloadFile(file);
@@ -303,6 +321,7 @@ export class MapView extends TextFileView implements KeyTarget, HoverParent {
 	}
 
 	clear(): void {
+		this.endPresentation();
 		this.commitEdit();
 		this.clearTimers();
 		this.search?.close(false);
@@ -468,7 +487,8 @@ export class MapView extends TextFileView implements KeyTarget, HoverParent {
 			return false;
 		}
 		const collapsed = collapsedIdsForSave(this.session.doc.root, this.session.view).ids;
-		const state = stateJson(collapsed, this.session.doc.frontmatter?.state?.extra ?? {});
+		const st = this.session.doc.frontmatter?.state;
+		const state = stateJson(collapsed, st?.extra ?? {}, st?.layout);
 		const finalNewline = original === '' || original.endsWith('\n');
 		this.session.external(toMapText(this.session.text, { headLevel: this.headLevel(), state, finalNewline }));
 		this.data = this.session.text;
@@ -710,8 +730,8 @@ export class MapView extends TextFileView implements KeyTarget, HoverParent {
 		if (!r || !this.loaded || this.unsupported) return;
 		const doc = this.session.doc;
 		const v = this.session.view;
-		const root: MapNode = doc.virtualRoot ? { ...doc.root, text: this.session.rootName } : doc.root;
-		const hidden = new Set([...v.collapsed].filter((id) => !v.tempExpanded.has(id)));
+		const root = this.drawnRoot();
+		const hidden = this.presentHidden ?? this.hiddenIds();
 		// Read before the update: a deleted focus node still holds keyboard focus here.
 		const hadFocus = this.contentEl.contains(this.contentEl.ownerDocument.activeElement);
 		const s = this.plugin.settings;
@@ -722,7 +742,7 @@ export class MapView extends TextFileView implements KeyTarget, HoverParent {
 				focusId: v.focus,
 				selection: v.selection.ids,
 				primary: v.selection.primary,
-				...settingsLook(s),
+				...settingsLook(s, this.direction()),
 				searchMatches: this.search?.matches,
 				searchCurrent: this.search?.current ?? null,
 				taskProgress: s.showTaskProgress ? this.taskCounts(doc.root) : undefined,
@@ -740,10 +760,26 @@ export class MapView extends TextFileView implements KeyTarget, HoverParent {
 			// Only take keyboard focus back when the map had it (not from a Markdown editor typing in a split).
 			if (hadFocus) this.focusMap();
 		}
+		// presenting: the route follows the new text or folds, the current node stays (spec 5.13)
+		const aim = this.presentAim;
+		this.presentAim = false;
+		this.presentation?.refresh(aim);
 		this.updateToolbar();
 		this.mobileBar?.update();
 		this.multiBar?.update();
 		this.syncToText();
+	}
+
+	/** The root as drawn: a virtual root shows the file name. */
+	private drawnRoot(): MapNode {
+		const doc = this.session.doc;
+		return doc.virtualRoot ? { ...doc.root, text: this.session.rootName } : doc.root;
+	}
+
+	/** Collapsed nodes whose children are hidden (not temporarily expanded by the search). */
+	private hiddenIds(): Set<string> {
+		const v = this.session.view;
+		return new Set([...v.collapsed].filter((id) => !v.tempExpanded.has(id)));
 	}
 
 	/** Counted over the whole tree, collapsed branches included, once per parse (one pass). */
@@ -769,50 +805,64 @@ export class MapView extends TextFileView implements KeyTarget, HoverParent {
 	}
 
 	private renderEvents(): RenderEvents {
+		// presenting (spec 5.13) is read-only; the renderer already ignores this input then, this keeps it so
+		const live = <A extends unknown[]>(fn: (...args: A) => void) => (...args: A): void => {
+			if (!this.presentation) fn(...args);
+		};
 		return {
-			nodeClick: (id, mods) => this.onNodeClick(id, mods),
-			toggleCollapse: (id) => {
+			nodeClick: live((id: string, mods: Modifiers) => this.onNodeClick(id, mods)),
+			toggleCollapse: (id: string) => {
+				if (this.presentation) {
+					this.togglePresentFold(id);
+					return;
+				}
 				this.hideMenu();
 				const next = new Set(this.session.view.collapsed);
 				if (next.has(id)) next.delete(id);
 				else next.add(id);
 				this.setCollapsed(next);
 			},
-			taskToggle: (id) => {
+			taskToggle: live((id: string) => {
 				this.hideMenu();
 				if (!this.canEdit()) return;
 				this.commitEdit();
 				const node = indexNodes(this.session.doc.root).get(id)?.node;
 				// one character in the brackets; the selection stays as it is (spec 5.9)
 				if (node) this.runSteps(toggleTaskSteps([node]), { reveal: false, select: keepSelection(this.session) });
-			},
-			nodeDoubleClick: (id) => {
+			}),
+			nodeDoubleClick: live((id: string) => {
 				this.select([id], id, false);
 				this.startEdit(id, 'end');
-			},
-			backgroundClick: () => {
+			}),
+			backgroundClick: live(() => {
 				this.hideMenu();
 				this.commitEdit();
 				if (Date.now() - this.lastBoxSelect < 300) return;
 				this.session.setView(clearSelection(this.session.view));
 				this.render();
-			},
-			boxSelect: (ids, additive) => {
+			}),
+			boxSelect: live((ids: string[], additive: boolean) => {
 				this.commitEdit();
 				this.lastBoxSelect = Date.now();
 				const cur = this.session.view.selection;
 				const all = additive ? [...cur.ids.filter((x) => !ids.includes(x)), ...ids] : ids;
 				this.select(all, all[all.length - 1] ?? null, false);
-			},
-			drop: (ids, targetId, place, copy) => this.onDrop(ids, targetId, place, copy),
-			contextMenu: (id, at) => this.onContextMenu(id, at),
+			}),
+			drop: live((ids: string[], targetId: string, place: DropPlace, copy: boolean) => this.onDrop(ids, targetId, place, copy)),
+			contextMenu: live((id: string, at: Point) => this.onContextMenu(id, at)),
 			editInput: () => this.updateSuggest(),
 			pasteFiles: (id, files) => void addImageFiles(this, id, files, true),
-			linkClick: (href, evt) => this.plugin.openLink(href, this.file?.path ?? '', evt),
-			cardClick: (link, evt) => void this.plugin.cards.open(link, this.file?.path ?? '', evt, this.contentEl),
-			linkHover: (href, el, evt) => this.hoverLink(href, el, evt),
+			linkClick: live((href: string, evt: MouseEvent) => this.plugin.openLink(href, this.file?.path ?? '', evt)),
+			cardClick: live((link: string, evt: MouseEvent) => void this.plugin.cards.open(link, this.file?.path ?? '', evt, this.contentEl)),
+			linkHover: live((href: string, el: HTMLElement, evt: MouseEvent) => this.hoverLink(href, el, evt)),
 			viewportChange: () => this.multiBar?.follow(),
-			layoutChange: () => this.multiBar?.update(),
+			layoutChange: () => {
+				this.multiBar?.update();
+				// a temporary expand draws new nodes whose sizes settle a frame later: aim at the final layout
+				if (this.presentation && Date.now() < this.presentSettle) this.presentation.aim(true);
+			},
+			swipe: (dir) => this.presentation?.act(dir),
+			presentClick: (id) => this.presentation?.jump(id),
 		};
 	}
 
@@ -852,6 +902,11 @@ export class MapView extends TextFileView implements KeyTarget, HoverParent {
 		button(view, 'zoom-in', 'zoom-in', t('Zoom in'), () => this.renderer?.zoomBy(1.2));
 		button(view, 'zoom-out', 'zoom-out', t('Zoom out'), () => this.renderer?.zoomBy(1 / 1.2));
 		button(view, 'fit', 'maximize', t('fit-view'), () => this.renderer?.fit());
+		button(view, 'layout-direction', 'network', t('layout-direction'), () => this.showDirectionMenu());
+		button(view, 'present', 'presentation', t('start-presentation'), () => this.startPresentation());
+		// older Obsidian versions have no "presentation" icon (plan, stage 8)
+		const present = view.querySelector(`[${DOM.actionAttr}="present"]`);
+		if (present && !present.querySelector('svg')) setIcon(present as HTMLElement, 'monitor-play');
 	}
 
 	private updateToolbar(): void {
@@ -865,8 +920,54 @@ export class MapView extends TextFileView implements KeyTarget, HoverParent {
 		};
 		set('search', this.canEdit());
 		set('export', this.canEdit());
+		set('layout-direction', this.canEdit() && !this.isEditing() && !this.isPresenting());
+		set('present', this.canEdit());
 		set('undo', this.session.history.undoSize > 0);
 		set('redo', this.session.history.redoSize > 0);
+	}
+
+	/** Toolbar menu for this map's own layout direction (spec 9.2). */
+	private showDirectionMenu(): void {
+		if (!this.canEdit() || this.isEditing() || this.isPresenting()) return;
+		const button = this.toolbarEl?.querySelector<HTMLElement>(`[${DOM.actionAttr}="layout-direction"]`);
+		const own = this.session.doc.frontmatter?.state?.layout;
+		const defDir = this.plugin.settings.layoutDirect;
+		const menu = new Menu();
+		for (const dir of DIRECTION_VALUES) {
+			menu.addItem((item) =>
+				item
+					.setTitle(t(`set-dir-${dir}` as StringKey))
+					.setChecked(own === dir)
+					.onClick(() => this.setDirection(dir)),
+			);
+		}
+		menu.addSeparator();
+		menu.addItem((item) =>
+			item
+				.setTitle(t('layout-use-default', t(`set-dir-${defDir}` as StringKey)))
+				.setChecked(own === undefined)
+				.onClick(() => this.setDirection(null)),
+		);
+		const r = button?.getBoundingClientRect();
+		if (r) menu.showAtPosition({ x: r.left, y: r.bottom }, this.contentEl.ownerDocument);
+		else menu.showAtPosition({ x: 0, y: 0 }, this.contentEl.ownerDocument);
+	}
+
+	/** Set or clear this map's own layout direction (spec 9.2): one undo step, fit without zooming in past the previous scale. */
+	setDirection(dir: LayoutDirection | null): boolean {
+		if (!this.canEdit() || this.isEditing() || this.isPresenting()) return false;
+		const st = this.session.doc.frontmatter?.state;
+		const hasRaw = st != null && (st.layout !== undefined || Object.prototype.hasOwnProperty.call(st.extra, 'layout'));
+		if (dir === null && !hasRaw) return false;
+		if (dir !== null && st?.layout === dir) return false;
+		const prevScale = this.renderer?.zoom ?? 1;
+		this.prepare();
+		const ok = this.session.run(
+			collapseSteps(this.session.view.collapsed, Math.random, dir),
+			{ reveal: false, select: keepSelection(this.session) },
+		);
+		if (ok) this.renderer?.fit(Math.min(1, prevScale));
+		return ok;
 	}
 
 	private buildMenu(menu: HTMLElement): void {
@@ -1122,6 +1223,97 @@ export class MapView extends TextFileView implements KeyTarget, HoverParent {
 		this.renderer?.focusNode(former);
 	}
 
+	// ------------------------------------------------------------ presentation (spec 5.13)
+
+	isPresenting(): boolean {
+		return this.presentation !== null;
+	}
+
+	/** Keys while presenting (spec 5.13): page keys turn, Esc ends, every other map key does nothing. False when not presenting. */
+	presentKey(evt: KeyboardEvent): boolean {
+		const p = this.presentation;
+		if (!p) return false;
+		const action = presentKeyAction(evt.key, { mod: evt.metaKey || evt.ctrlKey, alt: evt.altKey, shift: evt.shiftKey });
+		if (action === 'exit') this.endPresentation();
+		else if (action) p.act(action);
+		return true;
+	}
+
+	/**
+	 * A collapse dot or badge while presenting (spec 5.13 "临时展开"): the presentation's fold state
+	 * changes, the map is laid out again around the current node and the camera re-aimed. Nothing is
+	 * written, nothing goes on the undo stack.
+	 */
+	private togglePresentFold(id: string): void {
+		const p = this.presentation;
+		const hidden = this.presentHidden;
+		if (!p || !hidden) return;
+		const node = indexNodes(this.session.doc.root).get(id)?.node;
+		if (!node || node.children.length === 0) return;
+		if (hidden.has(id)) hidden.delete(id);
+		else hidden.add(id);
+		this.presentAim = true;
+		this.presentSettle = Date.now() + 1000;
+		this.render(p.current.current);
+	}
+
+	/**
+	 * Start presenting the whole map (spec 5.13): an edit is committed and focus mode left first; pan,
+	 * zoom and selection are kept to be put back at the end. It starts from the selected node when
+	 * that is not the root, else from the root. Nothing happens while already presenting.
+	 */
+	startPresentation(): void {
+		if (this.presentation || !this.canEdit() || !this.renderer) return;
+		this.commitEdit();
+		this.hideMenu();
+		this.suggest?.close();
+		this.pendingArrow = null;
+		if (this.session.view.focus !== null) this.exitFocus();
+		if (!this.renderer) return;
+		const sel = this.session.view.selection;
+		this.presentSaved = { ids: [...sel.ids], primary: sel.primary };
+		this.presentHidden = this.hiddenIds();
+		// the toolbars hide first, so the camera measures the area they leave
+		this.contentEl.addClass(DOM.presenting);
+		const presentation = new Presentation(
+			{
+				container: this.contentEl,
+				renderer: () => this.renderer,
+				root: () => (this.loaded && !this.unsupported ? this.drawnRoot() : null),
+				hidden: () => this.presentHidden ?? this.hiddenIds(),
+				exit: () => this.endPresentation(),
+			},
+			Platform.isMobile,
+		);
+		this.presentation = presentation;
+		presentation.start(sel.primary);
+		this.multiBar?.update();
+		this.contentEl.focus({ preventScroll: true });
+	}
+
+	/** End presenting: leave full screen, bring the interface back and restore pan, zoom and selection (spec 5.13). */
+	endPresentation(): void {
+		const p = this.presentation;
+		if (!p) return;
+		this.presentation = null;
+		this.presentHidden = null;
+		this.presentAim = false;
+		p.destroy();
+		this.contentEl.removeClass(DOM.presenting);
+		const saved = this.presentSaved;
+		this.presentSaved = null;
+		if (saved && this.loaded && !this.unsupported) {
+			const index = indexNodes(this.session.doc.root);
+			const ids = saved.ids.filter((id) => index.has(id));
+			const primary = saved.primary !== null && index.has(saved.primary) ? saved.primary : ids[ids.length - 1] ?? null;
+			this.session.setSelection(ids, primary);
+			this.session.setView(pruneSelection(this.session.doc.root, this.session.view));
+		}
+		// no anchor: the viewport the renderer just put back stays
+		this.render(null);
+		this.focusMap();
+	}
+
 	/** Open the search bar (spec 5.4), or focus it when it is open. */
 	openSearch(): void {
 		if (!this.canEdit()) return;
@@ -1142,6 +1334,10 @@ export class MapView extends TextFileView implements KeyTarget, HoverParent {
 	}
 
 	escape(): void {
+		if (this.presentation) {
+			this.endPresentation();
+			return;
+		}
 		if (this.suggest?.isOpen) {
 			this.suggest.close();
 			return;
@@ -1219,6 +1415,7 @@ export class MapView extends TextFileView implements KeyTarget, HoverParent {
 		try {
 			const handle = this.renderer.startEditing(id, text, caret);
 			this.editing = { id, handle, original: text };
+			this.updateToolbar();
 			this.mobileBar?.update();
 			this.multiBar?.update();
 		} catch {
@@ -1449,6 +1646,13 @@ export class MapView extends TextFileView implements KeyTarget, HoverParent {
 		const controller = new AbortController();
 		this.exports.add(controller);
 		return exportMap(this, format, scale, controller.signal).finally(() => this.exports.delete(controller));
+	}
+
+	/** Export the whole map as `<note>.canvas` (spec 2.3 "白板导出"); aborted like the other exports when the view closes. */
+	exportCanvas(): Promise<void> {
+		const controller = new AbortController();
+		this.exports.add(controller);
+		return exportCanvas(this, controller.signal).finally(() => this.exports.delete(controller));
 	}
 
 	/** Command registry lookup for other modules (toolbar, tests). */

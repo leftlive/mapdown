@@ -18,15 +18,15 @@ import type { LayoutDirection, MapNode, ParsedDoc } from '../core/types.ts';
 import { indexNodes, type StepFn } from './session.ts';
 import { mapPos } from './textEdits.ts';
 
-export type Side = 'root' | 'left' | 'right';
+export type Side = 'root' | 'left' | 'right' | 'down';
 
-/** Side of the root each node is drawn on (behaviour spec 9). */
+/** Side of the root each node is drawn on (behaviour spec 9, 9.1). */
 export function sidesOf(root: MapNode, direction: LayoutDirection): Map<string, Side> {
 	const out = new Map<string, Side>([[root.id, 'root']]);
 	const n = root.children.length;
 	const rightCount = direction === 'right' ? n : direction === 'left' ? 0 : Math.ceil(n / 2);
 	root.children.forEach((c, i) => {
-		const side: Side = i < rightCount ? 'right' : 'left';
+		const side: Side = direction === 'down' ? 'down' : i < rightCount ? 'right' : 'left';
 		const walk = (node: MapNode): void => {
 			out.set(node.id, side);
 			node.children.forEach(walk);
@@ -39,6 +39,19 @@ export function sidesOf(root: MapNode, direction: LayoutDirection): Map<string, 
 const isOpen = (view: ViewState, id: string): boolean => !view.collapsed.has(id) || view.tempExpanded.has(id);
 
 export type Arrow = 'up' | 'down' | 'left' | 'right';
+export type MoveOp = 'up' | 'down' | 'indent' | 'outdent';
+
+/** Which tree move an Alt+Shift+arrow command performs (spec 2.2, 9.1). */
+export function moveOpFor(arrow: Arrow, side: Side, direction: LayoutDirection): MoveOp {
+	if (direction === 'down') {
+		if (arrow === 'left') return 'up';
+		if (arrow === 'right') return 'down';
+		return arrow === 'up' ? 'outdent' : 'indent';
+	}
+	if (arrow === 'up' || arrow === 'down') return arrow;
+	const outdent = (side === 'right' && arrow === 'left') || (side === 'left' && arrow === 'right');
+	return outdent ? 'outdent' : 'indent';
+}
 
 export interface NavResult {
 	/** Node to select. */
@@ -47,7 +60,7 @@ export interface NavResult {
 	expand: string | null;
 }
 
-/** Root children on the same side as `id`, in on-screen order (top to bottom). */
+/** Root children on the same side as `id`, in on-screen order (top to bottom, or left to right). */
 function sideSiblings(root: MapNode, id: string, sides: Map<string, Side>, direction: LayoutDirection): MapNode[] {
 	const side = sides.get(id);
 	const list = root.children.filter((c) => sides.get(c.id) === side);
@@ -55,10 +68,11 @@ function sideSiblings(root: MapNode, id: string, sides: Map<string, Side>, direc
 }
 
 /**
- * Arrow keys (spec 3.1). Up/down: previous or next sibling; at either end,
- * the parent's previous or next sibling. Towards the root: the parent. Away
- * from the root: the first child, opening the node first when collapsed. On
- * the root, left/right go to the first child on that side.
+ * Arrow keys (spec 3.1, 9.1). In horizontal directions: up/down move across
+ * siblings (and at either end, to the parent's sibling); towards the root goes
+ * to the parent; away from the root goes to the first child (opening it if
+ * collapsed). In downward layout the axes swap: left/right across siblings,
+ * up to the parent, down to the first child.
  */
 export function navigate(doc: ParsedDoc, view: ViewState, from: string | null, arrow: Arrow, direction: LayoutDirection): NavResult {
 	const root = doc.root;
@@ -72,8 +86,9 @@ export function navigate(doc: ParsedDoc, view: ViewState, from: string | null, a
 	const siblingsOf = (n: MapNode, p: MapNode | null): MapNode[] =>
 		p === null ? [] : p === root ? sideSiblings(root, n.id, sides, direction) : p.children;
 
-	if (arrow === 'up' || arrow === 'down') {
-		const step = arrow === 'up' ? -1 : 1;
+	const siblingAxis = direction === 'down' ? arrow === 'left' || arrow === 'right' : arrow === 'up' || arrow === 'down';
+	if (siblingAxis) {
+		const step = arrow === 'up' || arrow === 'left' ? -1 : 1;
 		const sibs = siblingsOf(node, parent);
 		const at = sibs.indexOf(node);
 		const next = sibs[at + step];
@@ -85,6 +100,13 @@ export function navigate(doc: ParsedDoc, view: ViewState, from: string | null, a
 			if (pnext) return { select: pnext.id, expand: null };
 		}
 		return { select: from, expand: null };
+	}
+
+	if (direction === 'down') {
+		if (arrow === 'up') return { select: parent?.id ?? from, expand: null };
+		const first = node.children[0];
+		if (!first) return { select: from, expand: null };
+		return { select: first.id, expand: side !== 'root' && !isOpen(view, node.id) ? node.id : null };
 	}
 
 	const towardsRoot = (side === 'right' && arrow === 'left') || (side === 'left' && arrow === 'right');

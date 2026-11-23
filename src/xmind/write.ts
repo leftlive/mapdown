@@ -35,6 +35,7 @@ const STRUCTURES: Record<string, string> = {
     right: 'org.xmind.ui.logic.right',
     left: 'org.xmind.ui.logic.left',
     clockwise: 'org.xmind.ui.map.clockwise',
+    down: 'org.xmind.ui.org-chart.down',
 };
 
 const LINK = /\[((?:\\.|[^\]\\])*)\]\(([^)\s]+)\)/g;

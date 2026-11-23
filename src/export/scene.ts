@@ -3,7 +3,7 @@
 // scale, and the SVG string drawn straight from a layout result. No DOM and no
 // Obsidian here; the exporter (exporter.ts) supplies measuring, images and theme.
 
-import { layout, type LayoutEdge, type LayoutInput, type LayoutResult, type NodePlacement } from "../core/layout.ts";
+import { edgePath, layout, type LayoutEdge, type LayoutInput, type LayoutResult, type NodePlacement } from "../core/layout.ts";
 import { findEmbeds } from "../core/mapCard.ts";
 import type { LayoutDirection, NodeKind, Size } from "../core/types.ts";
 import type { BranchStyle } from "../settings.ts";
@@ -747,26 +747,44 @@ function nodeSvg(node: SceneNode, scene: Scene, m: ContentMetrics, index: number
 		// First level, like styles.css: the branch colour is deepest along the side facing the parent and
 		// fades inwards; an ellipse centred 28 px in makes the front curve in towards that edge in the middle.
 		const id = `mapdown-wash-${index}`;
-		const left = p.side === "left";
-		const band = Math.min(28, p.width);
-		const edge = left ? p.x + p.width : p.x;
-		const cx = left ? edge - band : edge + band;
-		const cy = p.y + p.height / 2;
-		const rx = 40;
-		const ry = 1.4 * p.height;
 		const color = escapeXml(node.color);
 		const stop = (offset: number, opacity: number): string =>
 			`<stop offset="${offset}" stop-color="${color}" stop-opacity="${opacity}"/>`;
-		const fadeX2 = left ? edge - band : edge + band;
-		out.push(
-			"<defs>",
-			`<radialGradient id="${id}" gradientUnits="userSpaceOnUse" cx="${r2(cx)}" cy="${r2(cy)}" r="${rx}" gradientTransform="matrix(1 0 0 ${r2(ry / rx)} 0 ${r2(cy * (1 - ry / rx))})">`,
-			`${stop(0.36, 0)}${stop(0.46, 0.08)}${stop(0.57, 0.24)}${stop(0.69, 0.45)}${stop(0.83, 0.64)}${stop(1, 0.76)}</radialGradient>`,
-			`<linearGradient id="${id}-fade" gradientUnits="userSpaceOnUse" x1="${r2(edge)}" y1="0" x2="${r2(fadeX2)}" y2="0"><stop offset="0.3" stop-color="#fff"/><stop offset="1" stop-color="#fff" stop-opacity="0"/></linearGradient>`,
-			`<mask id="${id}-mask"><rect x="${r2(p.x)}" y="${r2(p.y)}" width="${r2(p.width)}" height="${r2(p.height)}" fill="url(#${id}-fade)"/></mask>`,
-			"</defs>",
-			`<rect x="${r2(p.x + 0.5)}" y="${r2(p.y + 0.5)}" width="${r2(p.width - 1)}" height="${r2(p.height - 1)}" rx="${r2(radius)}" fill="url(#${id})" mask="url(#${id}-mask)"/>`,
-		);
+		if (p.side === "down") {
+			const band = Math.min(28, p.height);
+			const edge = p.y;
+			const cx = p.x + p.width / 2;
+			const cy = edge + band;
+			const rx = 1.4 * p.width;
+			const ry = 40;
+			out.push(
+				"<defs>",
+				`<radialGradient id="${id}" gradientUnits="userSpaceOnUse" cx="${r2(cx)}" cy="${r2(cy)}" r="${ry}" gradientTransform="matrix(${r2(rx / ry)} 0 0 1 ${r2(cx * (1 - rx / ry))} 0)">`,
+				`${stop(0.36, 0)}${stop(0.46, 0.08)}${stop(0.57, 0.24)}${stop(0.69, 0.45)}${stop(0.83, 0.64)}${stop(1, 0.76)}</radialGradient>`,
+				`<linearGradient id="${id}-fade" gradientUnits="userSpaceOnUse" x1="0" y1="${r2(edge)}" x2="0" y2="${r2(edge + band)}"><stop offset="0.3" stop-color="#fff"/><stop offset="1" stop-color="#fff" stop-opacity="0"/></linearGradient>`,
+				`<mask id="${id}-mask"><rect x="${r2(p.x)}" y="${r2(p.y)}" width="${r2(p.width)}" height="${r2(p.height)}" fill="url(#${id}-fade)"/></mask>`,
+				"</defs>",
+				`<rect x="${r2(p.x + 0.5)}" y="${r2(p.y + 0.5)}" width="${r2(p.width - 1)}" height="${r2(p.height - 1)}" rx="${r2(radius)}" fill="url(#${id})" mask="url(#${id}-mask)"/>`,
+			);
+		} else {
+			const left = p.side === "left";
+			const band = Math.min(28, p.width);
+			const edge = left ? p.x + p.width : p.x;
+			const cx = left ? edge - band : edge + band;
+			const cy = p.y + p.height / 2;
+			const rx = 40;
+			const ry = 1.4 * p.height;
+			const fadeX2 = left ? edge - band : edge + band;
+			out.push(
+				"<defs>",
+				`<radialGradient id="${id}" gradientUnits="userSpaceOnUse" cx="${r2(cx)}" cy="${r2(cy)}" r="${rx}" gradientTransform="matrix(1 0 0 ${r2(ry / rx)} 0 ${r2(cy * (1 - ry / rx))})">`,
+				`${stop(0.36, 0)}${stop(0.46, 0.08)}${stop(0.57, 0.24)}${stop(0.69, 0.45)}${stop(0.83, 0.64)}${stop(1, 0.76)}</radialGradient>`,
+				`<linearGradient id="${id}-fade" gradientUnits="userSpaceOnUse" x1="${r2(edge)}" y1="0" x2="${r2(fadeX2)}" y2="0"><stop offset="0.3" stop-color="#fff"/><stop offset="1" stop-color="#fff" stop-opacity="0"/></linearGradient>`,
+				`<mask id="${id}-mask"><rect x="${r2(p.x)}" y="${r2(p.y)}" width="${r2(p.width)}" height="${r2(p.height)}" fill="url(#${id}-fade)"/></mask>`,
+				"</defs>",
+				`<rect x="${r2(p.x + 0.5)}" y="${r2(p.y + 0.5)}" width="${r2(p.width - 1)}" height="${r2(p.height - 1)}" rx="${r2(radius)}" fill="url(#${id})" mask="url(#${id}-mask)"/>`,
+			);
+		}
 	}
 	const ox = p.x + m.border + (node.padX ?? m.padX);
 	const oy = p.y + m.border + (node.padY ?? m.padY);
@@ -790,8 +808,8 @@ function nodeSvg(node: SceneNode, scene: Scene, m: ContentMetrics, index: number
 		const fs = 11;
 		const h = 18;
 		const w = Math.max(20, Math.round(label.length * fs * 0.62 + 10));
-		const bx = p.side === "left" ? p.x - 6 - w : p.x + p.width + 6;
-		const by = p.y + p.height / 2 - h / 2;
+		const bx = p.side === "down" ? p.x + p.width / 2 - w / 2 : p.side === "left" ? p.x - 6 - w : p.x + p.width + 6;
+		const by = p.side === "down" ? p.y + p.height + 6 : p.y + p.height / 2 - h / 2;
 		const color = node.color || t.faint;
 		out.push(
 			`<rect x="${r2(bx + 0.75)}" y="${r2(by + 0.75)}" width="${w - 1.5}" height="${h - 1.5}" rx="${r2(h / 2)}" fill="${escapeXml(t.nodeFill)}" stroke="${escapeXml(color)}" stroke-width="1.5"/>`,
@@ -840,9 +858,8 @@ export function buildSvg(scene: Scene, metrics: ContentMetrics, pixelScale = 1):
 	];
 	const widths = edgeWidths(scene.branchStyle);
 	for (const e of scene.edges) {
-		const d = `M ${r2(e.from.x)} ${r2(e.from.y)} C ${r2(e.c1.x)} ${r2(e.c1.y)}, ${r2(e.c2.x)} ${r2(e.c2.y)}, ${r2(e.to.x)} ${r2(e.to.y)}`;
 		const width = e.parentId === scene.rootId ? widths.root : widths.other;
-		out.push(`<path d="${d}" stroke="${escapeXml(e.color)}" stroke-width="${width}"/>`);
+		out.push(`<path d="${edgePath(e)}" stroke="${escapeXml(e.color)}" stroke-width="${width}"/>`);
 	}
 	out.push("</g>");
 	scene.nodes.forEach((node, i) => out.push(nodeSvg(node, scene, metrics, i, pixelScale)));

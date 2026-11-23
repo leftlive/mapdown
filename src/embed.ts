@@ -422,7 +422,7 @@ class MapEmbed extends MarkdownRenderChild {
 			focusId: focus?.id ?? null,
 			selection: [],
 			primary: null,
-			...settingsLook(s),
+			...settingsLook(s, doc.frontmatter?.state?.layout ?? s.layoutDirect),
 			taskProgress: s.showTaskProgress ? (shared.counts ??= taskProgress(doc.root)) : undefined,
 			mapCards: this.manager.plugin.cards.labels(doc.root, this.file.path),
 			readOnly: true,

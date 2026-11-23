@@ -3,6 +3,7 @@
 
 import type {
 	Frontmatter,
+	LayoutDirection,
 	ListStyle,
 	MapNode,
 	MindmarkState,
@@ -190,6 +191,12 @@ function unquote(s: string): string {
 	return m ? (m[1] ?? m[2] ?? '') : s;
 }
 
+const LAYOUT_DIRECTIONS = new Set<string>(['mindmap', 'right', 'left', 'clockwise', 'down']);
+
+function isLayoutDirection(v: unknown): v is LayoutDirection {
+	return typeof v === 'string' && LAYOUT_DIRECTIONS.has(v);
+}
+
 function readState(value: string): MindmarkState | 'invalid' | 'unsupported' {
 	const parsed = parseYamlFlow(value);
 	if (!parsed.ok) return 'invalid';
@@ -201,9 +208,15 @@ function readState(value: string): MindmarkState | 'invalid' | 'unsupported' {
 	if (version !== 1 && version !== 2) return 'unsupported';
 	const collapsed = record['collapsed'] ?? [];
 	if (!Array.isArray(collapsed) || !collapsed.every((c) => typeof c === 'string')) return 'invalid';
+	const rawLayout = Object.prototype.hasOwnProperty.call(record, 'layout') ? record['layout'] : undefined;
+	const layout = isLayoutDirection(rawLayout) ? rawLayout : undefined;
 	const extra: Record<string, unknown> = {};
-	for (const [k, v] of Object.entries(record)) if (k !== 'version' && k !== 'collapsed') Object.defineProperty(extra, k, { value: v, enumerable: true, writable: true, configurable: true });
-	return { version, collapsed: collapsed, extra };
+	for (const [k, v] of Object.entries(record)) {
+		if (k === 'version' || k === 'collapsed') continue;
+		if (k === 'layout' && layout !== undefined) continue;
+		Object.defineProperty(extra, k, { value: v, enumerable: true, writable: true, configurable: true });
+	}
+	return layout !== undefined ? { version, collapsed, layout, extra } : { version, collapsed, extra };
 }
 
 type Flow = { ok: true; value: unknown } | { ok: false };

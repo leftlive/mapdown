@@ -109,11 +109,17 @@ export function centerOnRect(vp: Viewport, r: Rect, area: Rect): Viewport {
 	return { scale: vp.scale, x: area.x + area.width / 2 - cx * vp.scale, y: area.y + area.height / 2 - cy * vp.scale };
 }
 
-/** Viewport showing all of `bounds` inside `area` with `pad` screen pixels around; never zooms in past 1. */
-export function fitBounds(bounds: Rect, area: Rect, pad: number): Viewport {
+/** Viewport at `vp`'s scale with `r` horizontally centred in `area` and its top edge `margin` screen pixels below the top of `area`. */
+export function topOnRect(vp: Viewport, r: Rect, area: Rect, margin: number): Viewport {
+	const cx = r.x + r.width / 2;
+	return { scale: vp.scale, x: area.x + area.width / 2 - cx * vp.scale, y: area.y + margin - r.y * vp.scale };
+}
+
+/** Viewport showing all of `bounds` inside `area` with `pad` screen pixels around; never zooms in past `maxZoom` (default 1). */
+export function fitBounds(bounds: Rect, area: Rect, pad: number, maxZoom = 1): Viewport {
 	const w = Math.max(1, area.width - 2 * pad);
 	const h = Math.max(1, area.height - 2 * pad);
-	const s = clampZoom(Math.min(1, w / Math.max(1, bounds.width), h / Math.max(1, bounds.height)));
+	const s = clampZoom(Math.min(maxZoom, w / Math.max(1, bounds.width), h / Math.max(1, bounds.height)));
 	return centerOnRect({ x: 0, y: 0, scale: s }, bounds, area);
 }
 
@@ -137,11 +143,12 @@ function axisShift(start: number, size: number, screen: number, pad: number): nu
 }
 
 /**
- * The point of a node that stays put on screen when the node changes size (spec 3.1): the edge facing
- * its parent (left edge on the right side, right edge on the left side, centre for the root),
- * at the node's vertical centre.
+ * The point of a node that stays put on screen when the node changes size (spec 3.1, 9.1): the edge
+ * facing its parent (left edge on the right side, right edge on the left side, centre for the root),
+ * at the node's vertical centre; in downward layout, the top edge at the horizontal centre.
  */
-export function anchorPoint(r: Rect, side: "root" | "left" | "right"): Point {
+export function anchorPoint(r: Rect, side: "root" | "left" | "right" | "down"): Point {
+	if (side === "down") return { x: r.x + r.width / 2, y: r.y };
 	const x = side === "right" ? r.x : side === "left" ? r.x + r.width : r.x + r.width / 2;
 	return { x, y: r.y + r.height / 2 };
 }
@@ -152,17 +159,18 @@ export function anchorShift(vp: Viewport, before: Point, after: Point): Viewport
 }
 
 /**
- * Viewport on entering focus mode (spec 5.3). The subtree `box` is centred in `area` with `pad` pixels
- * around. The scale is a readable one: at least 1 (a larger current zoom is kept), shrunk to fit the
- * box, but not below `minScale`. When the box is still wider than the area, the focus node (`focus`)
- * is kept `pad` pixels from the area's edge on its parent-facing side and the subtree runs off the
- * other side; a root focus (`side` "root") is always centred. Vertically the box is always centred.
+ * Viewport on entering focus mode (spec 5.3, 9.1). The subtree `box` is centred in `area` with `pad`
+ * pixels around. The scale is a readable one: at least 1 (a larger current zoom is kept), shrunk to
+ * fit the box, but not below `minScale`. When the box is still wider than the area (horizontal), the
+ * focus node (`focus`) is kept `pad` pixels from the area's edge on its parent-facing side; in
+ * downward layout, when the box is taller than the area, the box is centred horizontally and the
+ * focus node is kept `pad` pixels from the top edge.
  */
 export function focusViewport(
 	vp: Viewport,
 	box: Rect,
 	focus: Rect,
-	side: "root" | "left" | "right",
+	side: "root" | "left" | "right" | "down",
 	area: Rect,
 	pad: number,
 	minScale: number,
@@ -173,6 +181,11 @@ export function focusViewport(
 	);
 	const scale = clampZoom(Math.max(minScale, Math.min(Math.max(vp.scale, 1), fitScale)));
 	const centred = centerOnRect({ x: 0, y: 0, scale }, box, area);
+	if (side === "down") {
+		if (box.height * scale + 2 * pad <= area.height) return centred;
+		const ay = anchorPoint(focus, "down").y * scale;
+		return { scale, x: centred.x, y: area.y + pad - ay };
+	}
 	if (side === "root" || box.width * scale + 2 * pad <= area.width) return centred;
 	const ax = anchorPoint(focus, side).x * scale;
 	return { scale, y: centred.y, x: side === "right" ? area.x + pad - ax : area.x + area.width - pad - ax };
@@ -206,4 +219,39 @@ export function barPosition(sel: Rect | null, bar: { width: number; height: numb
 	const below = y1 + gap;
 	if (below + bar.height <= area.y + area.height) return { x, y: below };
 	return { x, y: top };
+}
+
+/**
+ * Presentation camera (spec 5.13): `box` centred in `area` with `pad` pixels around, at the largest
+ * zoom that fits, kept within [minScale, maxScale] (and the general zoom limits).
+ */
+export function presentViewport(box: Rect, area: Rect, pad: number, minScale: number, maxScale: number): Viewport {
+	const fit = Math.min(
+		Math.max(1, area.width - 2 * pad) / Math.max(1, box.width),
+		Math.max(1, area.height - 2 * pad) / Math.max(1, box.height),
+	);
+	const scale = clampZoom(Math.max(minScale, Math.min(maxScale, fit)));
+	return centerOnRect({ x: 0, y: 0, scale }, box, area);
+}
+
+/** Ease-in-out (cubic) of `t` in [0, 1]. */
+export function easeInOut(t: number): number {
+	const c = Math.max(0, Math.min(1, t));
+	return c < 0.5 ? 4 * c * c * c : 1 - Math.pow(-2 * c + 2, 3) / 2;
+}
+
+/**
+ * A camera flight (spec 5.13) at progress `t` (0 to 1, eased here): the scale and the world point
+ * under the screen point `centre` move together, so the view glides instead of swinging about.
+ */
+export function flightViewport(from: Viewport, to: Viewport, centre: Point, t: number): Viewport {
+	const e = easeInOut(t);
+	if (e <= 0) return from;
+	if (e >= 1) return to;
+	const a = toWorld(from, centre);
+	const b = toWorld(to, centre);
+	const scale = from.scale + (to.scale - from.scale) * e;
+	const wx = a.x + (b.x - a.x) * e;
+	const wy = a.y + (b.y - a.y) * e;
+	return { scale, x: centre.x - wx * scale, y: centre.y - wy * scale };
 }

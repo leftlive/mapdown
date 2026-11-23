@@ -65,7 +65,7 @@ export const DEFAULT_SETTINGS: Readonly<MapdownSettings> = {
 };
 
 export const CANVAS_SIZES = [4000, 6000, 8000, 10000, 12000, 16000, 20000, 30000, 36000] as const;
-const DIRECTIONS: readonly LayoutDirection[] = ['mindmap', 'right', 'left', 'clockwise'];
+const DIRECTIONS: readonly LayoutDirection[] = ['mindmap', 'right', 'left', 'clockwise', 'down'];
 const LINK_MODES: readonly LinkOpenMode[] = ['current', 'tab', 'window'];
 export const BRANCH_STYLES: readonly BranchStyle[] = ['line', 'border', 'tint'];
 export const EXPORT_LOCATIONS: readonly ExportLocation[] = ['ask', 'note'];

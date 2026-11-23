@@ -11,7 +11,7 @@ export interface LayoutInput {
 	children: LayoutInput[];
 }
 
-export type Side = "root" | "left" | "right";
+export type Side = "root" | "left" | "right" | "down";
 
 export interface NodePlacement {
 	id: string;
@@ -71,15 +71,23 @@ export const ROOT_V_GAP = 20;
 export const H_GAP = 48;
 export const V_GAP = 14;
 
+/** Downward (org chart) spacing (behaviour spec 9.1). */
+export const DOWN_ROOT_V_GAP = 64;
+export const DOWN_ROOT_H_GAP = 28;
+export const DOWN_V_GAP = 44;
+export const DOWN_H_GAP = 16;
+
 /** Cached measurement of one non-root subtree. */
 interface Measure {
 	id: string;
 	width: number;
 	height: number;
 	collapsed: boolean;
+	/** True when measured for downward layout (span is width); false for horizontal (height). */
+	down: boolean;
 	/** Measurements of the laid-out children (empty when collapsed). */
 	children: Measure[];
-	/** Height reserved for the whole subtree. */
+	/** Span reserved for the whole subtree (height in horizontal, width in downward). */
 	subtree: number;
 	/** Each child's midline relative to this node's midline. */
 	offsets: number[];
@@ -108,19 +116,20 @@ export function createLayouter(): Layouter {
 	let measured = 0;
 	let visited = 0;
 
-	function measure(input: LayoutInput): Measure {
+	function measure(input: LayoutInput, down: boolean): Measure {
 		visited++;
 		const cached = cache.get(input.id);
 		const kids = input.collapsed ? NO_CHILDREN : input.children;
 		let reuse =
 			cached !== undefined &&
+			cached.down === down &&
 			cached.width === input.size.width &&
 			cached.height === input.size.height &&
 			cached.collapsed === input.collapsed &&
 			cached.children.length === kids.length;
 		let fresh: Measure[] | null = reuse ? null : [];
 		for (let i = 0; i < kids.length; i++) {
-			const m = measure(kids[i]);
+			const m = measure(kids[i], down);
 			if (fresh === null) {
 				// reuse is still possible: compare against the cached child
 				if (cached !== undefined && cached.children[i] === m) continue;
@@ -136,14 +145,15 @@ export function createLayouter(): Layouter {
 		measured++;
 		const children = fresh ?? [];
 		const offsets: number[] = [];
-		const block = stack(children, V_GAP, offsets);
+		const block = stack(children, down ? DOWN_H_GAP : V_GAP, offsets);
 		const entry: Measure = {
 			id: input.id,
 			width: input.size.width,
 			height: input.size.height,
 			collapsed: input.collapsed,
+			down,
 			children,
-			subtree: Math.max(input.size.height, block),
+			subtree: Math.max(down ? input.size.width : input.size.height, block),
 			offsets,
 			seen: generation,
 		};
@@ -155,11 +165,12 @@ export function createLayouter(): Layouter {
 		generation++;
 		measured = 0;
 		visited = 0;
+		const down = direction === "down";
 		const colours = palette.length > 0 ? palette : DEFAULT_PALETTE;
 
 		const kids = root.collapsed ? NO_CHILDREN : root.children;
 		const top: Measure[] = [];
-		for (const k of kids) top.push(measure(k));
+		for (const k of kids) top.push(measure(k, down));
 
 		// split the root's children into sides; branch = index in source order
 		const n = top.length;
@@ -234,17 +245,70 @@ export function createLayouter(): Layouter {
 			}
 		}
 
-		// midline of each root child, per side; then place in source order
-		const rootMid = root.size.height / 2;
-		const mids = new Array<number>(n);
-		for (const indices of [right, left]) {
-			const offsets: number[] = [];
-			stack(indices.map((i) => top[i]), ROOT_V_GAP, offsets);
-			for (let j = 0; j < indices.length; j++) mids[indices[j]] = rootMid + offsets[j];
+		function placeDown(
+			m: Measure,
+			parent: NodePlacement,
+			midX: number,
+			branch: number,
+			color: string,
+			vGap: number,
+		): void {
+			const x = midX - m.width / 2;
+			const y = parent.y + parent.height + vGap;
+			const p: NodePlacement = {
+				id: m.id,
+				x,
+				y,
+				width: m.width,
+				height: m.height,
+				side: "down",
+				depth: parent.depth + 1,
+				branch,
+			};
+			nodes.set(m.id, p);
+			if (x < minX) minX = x;
+			if (y < minY) minY = y;
+			if (x + m.width > maxX) maxX = x + m.width;
+			if (y + m.height > maxY) maxY = y + m.height;
+
+			const fromX = parent.x + parent.width / 2;
+			const fromY = parent.y + parent.height;
+			const midY = fromY + vGap / 2;
+			edges.push({
+				parentId: parent.id,
+				childId: m.id,
+				from: { x: fromX, y: fromY },
+				c1: { x: fromX, y: midY },
+				c2: { x: midX, y: midY },
+				to: { x: midX, y },
+				color,
+			});
+
+			for (let i = 0; i < m.children.length; i++) {
+				placeDown(m.children[i], p, midX + m.offsets[i], branch, color, DOWN_V_GAP);
+			}
 		}
-		for (let i = 0; i < n; i++) {
-			const side = i < rightCount ? "right" : "left";
-			place(top[i], rootPlacement, mids[i], side, i, colours[i % colours.length], ROOT_H_GAP);
+
+		if (down) {
+			const rootMidX = root.size.width / 2;
+			const offsets: number[] = [];
+			stack(top, DOWN_ROOT_H_GAP, offsets);
+			for (let i = 0; i < n; i++) {
+				placeDown(top[i], rootPlacement, rootMidX + offsets[i], i, colours[i % colours.length], DOWN_ROOT_V_GAP);
+			}
+		} else {
+			// midline of each root child, per side; then place in source order
+			const rootMid = root.size.height / 2;
+			const mids = new Array<number>(n);
+			for (const indices of [right, left]) {
+				const offsets: number[] = [];
+				stack(indices.map((i) => top[i]), ROOT_V_GAP, offsets);
+				for (let j = 0; j < indices.length; j++) mids[indices[j]] = rootMid + offsets[j];
+			}
+			for (let i = 0; i < n; i++) {
+				const side = i < rightCount ? "right" : "left";
+				place(top[i], rootPlacement, mids[i], side, i, colours[i % colours.length], ROOT_H_GAP);
+			}
 		}
 
 		// forget nodes that have left the tree once they dominate the cache
@@ -276,12 +340,29 @@ export function createLayouter(): Layouter {
  * as the full layout gives them. Focus mode lays a subtree out on this side
  * in this colour, so it keeps the look it has in the whole map (spec 5.3).
  */
-export function branchLook(topIndex: number, n: number, direction: LayoutDirection, palette: readonly string[]): { side: "left" | "right"; color: string } {
-	const rightCount = direction === "right" ? n : direction === "left" ? 0 : Math.ceil(n / 2);
+export function branchLook(
+	topIndex: number,
+	n: number,
+	direction: LayoutDirection,
+	palette: readonly string[],
+): { side: "left" | "right" | "down"; color: string } {
 	const colours = palette.length > 0 ? palette : DEFAULT_PALETTE;
-	return { side: topIndex < rightCount ? "right" : "left", color: colours[topIndex % colours.length] };
+	const color = colours[topIndex % colours.length];
+	if (direction === "down") return { side: "down", color };
+	const rightCount = direction === "right" ? n : direction === "left" ? 0 : Math.ceil(n / 2);
+	return { side: topIndex < rightCount ? "right" : "left", color };
 }
 
 export function layout(root: LayoutInput, direction: LayoutDirection, palette: readonly string[]): LayoutResult {
 	return createLayouter().layout(root, direction, palette);
+}
+
+const r2 = (n: number): number => Math.round(n * 100) / 100;
+
+/**
+ * SVG path `d` for one edge (behaviour spec 9 and 9.1). Shared between the
+ * screen renderer and SVG/PNG/JPEG/PDF/HTML export so both draw identical paths.
+ */
+export function edgePath(e: LayoutEdge): string {
+	return `M ${r2(e.from.x)} ${r2(e.from.y)} C ${r2(e.c1.x)} ${r2(e.c1.y)}, ${r2(e.c2.x)} ${r2(e.c2.y)}, ${r2(e.to.x)} ${r2(e.to.y)}`;
 }

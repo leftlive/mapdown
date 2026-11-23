@@ -5,6 +5,7 @@
 
 import type { Point } from "../core/types.ts";
 import type { Modifiers } from "./contract.ts";
+import { swipeAction } from "../core/presentation.ts";
 
 export type Target = { kind: "node"; id: string } | { kind: "background" };
 
@@ -45,6 +46,8 @@ export interface GestureSink {
 	dragMove(at: Point, mods: Modifiers): void;
 	dragEnd(at: Point, mods: Modifiers): void;
 	dragCancel(): void;
+	/** Presenting (spec 5.13): a one-finger horizontal swipe turns the page. */
+	swipe?(dir: "next" | "prev"): void;
 }
 
 export interface Clock {
@@ -71,7 +74,8 @@ type Mode =
 	| "box"
 	| "drag"
 	| "pinch"
-	| "settle"; // pinch ended; wait for every finger to lift
+	| "settle" // pinch ended; wait for every finger to lift
+	| "swipe"; // presenting: one finger moving, judged when it lifts
 
 interface Active {
 	id: number;
@@ -98,6 +102,11 @@ export class GestureRecognizer {
 	private readonly isMac: boolean;
 	/** Read-only map (embed, spec 5.10): drags pan, one finger is left to the page, no long-press menu. */
 	readOnly = false;
+	/**
+	 * Presenting (spec 5.13): nothing edits, drags or opens a menu. A node tap is a plain click, mouse
+	 * drags pan, one finger swipes between steps, two fingers pinch and pan.
+	 */
+	presenting = false;
 
 	constructor(sink: GestureSink, clock: Clock, now: () => number, isMac: boolean) {
 		this.sink = sink;
@@ -132,7 +141,7 @@ export class GestureRecognizer {
 			if (this.mode === "idle") this.pointers.delete(p.id);
 		} else if (button === 0) {
 			this.mode = "pending";
-			if (p.type === "touch" && !this.readOnly) {
+			if (p.type === "touch" && !this.readOnly && !this.presenting) {
 				this.clearTimer();
 				this.timer = this.clock.setTimeout(() => {
 					this.timer = null;
@@ -173,6 +182,10 @@ export class GestureRecognizer {
 				if (dist < slop) return;
 				this.clearTimer();
 				// read-only: the page scrolls under one finger; a second finger still pinches
+				if (s.type === "touch" && this.presenting) {
+					this.mode = "swipe";
+					return;
+				}
 				if (s.type === "touch" && this.readOnly) {
 					this.mode = "settle";
 					return;
@@ -215,8 +228,15 @@ export class GestureRecognizer {
 		this.reset();
 		switch (mode) {
 			case "pending":
-				this.tap(s, p);
+				// presenting: a node tap is a plain click (no double click, no Mod/Shift selection); the background nothing
+				if (!this.presenting) this.tap(s, p);
+				else if (s.target.kind === "node") this.sink.click(s.target, s.mods);
 				break;
+			case "swipe": {
+				const dir = swipeAction(p.x - s.x, p.y - s.y);
+				if (dir) this.sink.swipe?.(dir);
+				break;
+			}
 			case "armed":
 				if (s.target.kind === "node") this.sink.contextMenu(s.target.id, { x: p.x, y: p.y });
 				break;
@@ -275,7 +295,7 @@ export class GestureRecognizer {
 	}
 
 	private beginDragOrBox(s: PointerInput, p: PointerInput): void {
-		if (this.readOnly) {
+		if (this.readOnly || this.presenting) {
 			this.mode = "pan";
 			this.sink.panBy(p.x - s.x, p.y - s.y);
 		} else if (s.target.kind === "node") {

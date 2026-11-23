@@ -20,6 +20,11 @@ export interface KeyTarget {
 	commitEdit(): void;
 	escape(): void;
 	armArrow(arrow: Arrow): void;
+	/**
+	 * Presentation mode (spec 5.13): true when presenting, and the key was then handled by the
+	 * presentation (or ignored); false when not presenting.
+	 */
+	presentKey?(evt: KeyboardEvent): boolean;
 }
 
 type Action = string | ((t: KeyTarget) => void);
@@ -96,11 +101,25 @@ export const KEY_TABLE: readonly KeyBinding[] = [
 	...[1, 2, 3, 4, 5, 6].map((n): KeyBinding => ({ mods: ['Alt'], keys: [String(n)], action: `collapse-to-level-${n}` })),
 ];
 
-/** Register every binding of the table on `scope`. */
+/** Page keys of presentation mode (spec 5.13, presenter remotes) that are no map keys otherwise. */
+const PRESENT_ONLY_KEYS = ['PageDown', 'PageUp', 'End', 'o', 'O'];
+
+/** Register every binding of the table on `scope`. While presenting, all of them go to the presentation. */
 export function installKeymap(scope: Scope, target: KeyTarget): void {
+	// Space is registered as both ' ' and 'Space': one key press turns one page, however many match
+	const presented = new WeakSet<KeyboardEvent>();
+	const present = (evt: KeyboardEvent): boolean => {
+		if (presented.has(evt)) return true;
+		if (!target.presentKey?.(evt)) return false;
+		presented.add(evt);
+		return true;
+	};
+	for (const key of PRESENT_ONLY_KEYS) scope.register([], key, (evt) => !present(evt));
 	for (const binding of KEY_TABLE) {
 		const handler = (evt: KeyboardEvent): boolean => {
-			if (evt.isComposing || target.isComposing(evt)) return true;
+			if (evt.isComposing) return true;
+			if (present(evt)) return false;
+			if (target.isComposing(evt)) return true;
 			if (target.isEditing() && !binding.editing) return true;
 			if (typeof binding.action === 'string') target.run(binding.action);
 			else binding.action(target);

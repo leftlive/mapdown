@@ -1383,3 +1383,360 @@
 .mapdown-export-done {
 	cursor: pointer;
 }
+
+/* ---- presentation mode (spec 5.13, src/view/presentation.ts) ------------
+   Around the current node only the opacity of nodes and edges changes (an
+   edge follows its child node), plus a ring on the current node and on a
+   clicked leaf. The interface around the map hides; collapse dots and badges
+   stay for the presentation's own folds. The breadcrumb, bar and hint are
+   sized in em of --mapdown-present-scale (1 at 1440 px wide, at most 1.6). */
+
+.mapdown-view:fullscreen {
+	background-color: var(--background-primary);
+}
+
+.mapdown-view.is-presenting .mapdown-map {
+	background-image: none;
+}
+
+.mapdown-view.is-presenting .mapdown-toolbar,
+.mapdown-view.is-presenting .mapdown-minimap,
+.mapdown-view.is-presenting .mapdown-search,
+.mapdown-view.is-presenting .mapdown-mobile-toolbar,
+.mapdown-view.is-presenting .mapdown-multi-bar,
+.mapdown-view.is-presenting .mapdown-multi-menu,
+.mapdown-view.is-presenting .mapdown-node-menu {
+	display: none;
+}
+
+.mapdown-view.is-presenting .mapdown-node {
+	cursor: pointer;
+}
+
+.mapdown-view.is-presenting .mapdown-node-content a {
+	cursor: pointer;
+}
+
+.mapdown-view.is-presenting .mapdown-node:not(.is-selected):hover {
+	translate: none;
+}
+
+.mapdown-view.is-presenting .mapdown-node {
+	transition:
+		opacity 250ms ease-in-out,
+		box-shadow 0.2s ease,
+		border-color 0.2s ease;
+}
+
+.mapdown-view.is-presenting .mapdown-edges path {
+	transition: opacity 250ms ease-in-out;
+}
+
+/* a temporary expand or collapse moves nodes like any other layout change */
+.mapdown-view.is-presenting .mapdown-map.is-animating .mapdown-node {
+	transition:
+		opacity 250ms ease-in-out,
+		transform 200ms ease,
+		width 200ms ease,
+		height 200ms ease;
+}
+
+.mapdown-view.is-presenting .mapdown-map.is-animating .mapdown-edges path {
+	transition:
+		opacity 250ms ease-in-out,
+		d 200ms ease;
+}
+
+.mapdown-view .mapdown-node.is-present-dim,
+.mapdown-view .mapdown-edges path.is-present-dim {
+	opacity: 0.15;
+}
+
+/* a faded node can be clicked: it comes up on hover */
+.mapdown-view.is-presenting .mapdown-node.is-present-dim:hover {
+	opacity: 0.75;
+	box-shadow: 0 0 0 2px color-mix(in srgb, var(--mapdown-select) 35%, transparent);
+}
+
+/* the current node and a clicked leaf: drawn like the selection ring, with their own classes */
+.mapdown-view .mapdown-node.is-present-current,
+.mapdown-view .mapdown-node.is-present-leaf {
+	border-color: var(--mapdown-select);
+	box-shadow:
+		inset 0 0 0 100vmax color-mix(in srgb, var(--mapdown-select) 6%, transparent),
+		0 0 0 2px var(--background-primary),
+		0 0 0 4px var(--mapdown-select);
+}
+
+.mapdown-present-bar,
+.mapdown-present-crumbs,
+.mapdown-present-hint {
+	--mapdown-present-em: calc(13px * var(--mapdown-present-scale, 1));
+	font-size: var(--mapdown-present-em);
+	font-family: var(--font-interface);
+	user-select: none;
+	-webkit-user-select: none;
+}
+
+/* bottom centre: previous, progress track, "3 / 12", next | overview, level */
+.mapdown-present-bar {
+	position: absolute;
+	left: 50%;
+	bottom: calc(1.5em + var(--mapdown-view-bottom) + var(--mapdown-bottom-inset, 0px));
+	z-index: 3;
+	display: flex;
+	align-items: center;
+	gap: 0.9em;
+	padding: 0.45em 1.1em 0.45em 0.75em;
+	transform: translateX(-50%);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 999px;
+	background: color-mix(in srgb, var(--background-primary) 75%, transparent);
+	backdrop-filter: blur(8px);
+	box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12);
+	color: var(--text-normal);
+	white-space: nowrap;
+}
+
+.mapdown-present-bar .clickable-icon,
+.mapdown-view .mapdown-present-hint.clickable-icon {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	width: 2em;
+	height: 2em;
+	padding: 0;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 0.45em;
+	background: transparent;
+	box-shadow: none;
+	color: var(--text-muted);
+	font-size: inherit;
+	cursor: pointer;
+}
+
+.mapdown-present-bar .clickable-icon:hover:not(:disabled),
+.mapdown-view .mapdown-present-hint.clickable-icon:hover {
+	color: var(--text-normal);
+	background: var(--background-modifier-hover);
+}
+
+.mapdown-present-bar .clickable-icon.is-disabled {
+	opacity: 0.35;
+	cursor: default;
+}
+
+.mapdown-present-bar .clickable-icon svg,
+.mapdown-view .mapdown-present-hint.clickable-icon svg {
+	width: 1.1em;
+	height: 1.1em;
+}
+
+.mapdown-present-track {
+	width: 12em;
+	height: 0.3em;
+	overflow: hidden;
+	border-radius: 0.15em;
+	background: var(--background-modifier-border);
+}
+
+.mapdown-present-fill {
+	width: var(--mapdown-present-progress, 0%);
+	height: 100%;
+	border-radius: inherit;
+	background: var(--interactive-accent);
+	transition: width 250ms ease-in-out;
+}
+
+.mapdown-present-count {
+	min-width: 4em;
+	font-weight: 600;
+	font-variant-numeric: tabular-nums;
+	text-align: center;
+}
+
+.mapdown-present-divider {
+	width: 1px;
+	height: 1.4em;
+	background: var(--background-modifier-border);
+}
+
+/* the overview button: a key cap "O" and its label; pressed while the overview shows */
+.mapdown-present-bar .clickable-icon.mapdown-present-overview {
+	gap: 0.45em;
+	width: auto;
+	padding: 0 0.6em 0 0.3em;
+	border-color: transparent;
+}
+
+.mapdown-present-overview kbd {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	min-width: 1.5em;
+	height: 1.5em;
+	padding: 0 0.3em;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 0.3em;
+	background: var(--background-primary);
+	color: var(--text-muted);
+	font-family: var(--font-monospace);
+	font-size: 0.85em;
+}
+
+.mapdown-present-bar .clickable-icon.mapdown-present-overview.is-active {
+	border-color: var(--interactive-accent);
+	background: color-mix(in srgb, var(--interactive-accent) 14%, transparent);
+	color: var(--text-normal);
+}
+
+.mapdown-present-level-label {
+	display: flex;
+	align-items: center;
+	gap: 0.2em;
+	color: var(--text-muted);
+}
+
+.mapdown-present-bar select.mapdown-present-level {
+	height: 2em;
+	padding: 0 1.6em 0 0.4em;
+	border: none;
+	background-color: transparent;
+	box-shadow: none;
+	color: var(--text-normal);
+	font-size: inherit;
+	cursor: pointer;
+}
+
+/* top centre: the path from the root, its last segment bold; on the overview a hint */
+.mapdown-present-crumbs {
+	position: absolute;
+	top: 1.2em;
+	left: 50%;
+	z-index: 3;
+	display: flex;
+	align-items: center;
+	max-width: calc(100% - 2em);
+	padding: 0.45em 1.2em;
+	transform: translateX(-50%);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 999px;
+	background: color-mix(in srgb, var(--background-primary) 75%, transparent);
+	backdrop-filter: blur(8px);
+	box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+	color: var(--text-muted);
+	white-space: nowrap;
+}
+
+.mapdown-present-crumbs:empty {
+	display: none;
+}
+
+.mapdown-present-crumbs.is-hint {
+	color: var(--text-muted);
+}
+
+.mapdown-present-crumb-item {
+	display: inline-flex;
+	align-items: center;
+}
+
+.mapdown-present-crumb-sep {
+	padding: 0 0.5em;
+	color: var(--text-faint);
+}
+
+.mapdown-present-crumb,
+.mapdown-present-crumb-more {
+	border-radius: 0.3em;
+	cursor: pointer;
+}
+
+.mapdown-present-crumb:hover,
+.mapdown-present-crumb-more:hover {
+	color: var(--text-normal);
+	text-decoration: underline;
+}
+
+.mapdown-present-crumb.is-last {
+	color: var(--text-normal);
+	font-weight: 700;
+}
+
+/* top right: a faint "Esc to exit" (desktop), or an exit button (phones and tablets) */
+.mapdown-present-hint {
+	position: absolute;
+	top: 1.2em;
+	right: 1.5em;
+	z-index: 3;
+	color: var(--text-faint);
+	pointer-events: none;
+}
+
+.mapdown-view .mapdown-present-hint.clickable-icon {
+	width: 2.5em;
+	height: 2.5em;
+	pointer-events: auto;
+	background: color-mix(in srgb, var(--background-primary) 75%, transparent);
+}
+
+@media (max-width: 520px) {
+	.mapdown-present-track {
+		width: 4em;
+	}
+
+	.mapdown-present-level-label > span {
+		display: none;
+	}
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.mapdown-view.is-presenting .mapdown-node,
+	.mapdown-view.is-presenting .mapdown-edges path,
+	.mapdown-view.is-presenting .mapdown-map.is-animating .mapdown-node,
+	.mapdown-view.is-presenting .mapdown-map.is-animating .mapdown-edges path,
+	.mapdown-present-fill {
+		transition: none;
+	}
+}
+
+/* ---- downward (org chart) layout (spec 9.1) --------------------------- */
+
+.mapdown-node.is-down {
+	--mapdown-node-glow: 0 calc(-0.25 * var(--mapdown-glow-size, 10px)) calc(0.6 * var(--mapdown-glow-size, 10px)) -8px color-mix(in srgb, var(--mapdown-branch-color, transparent) 15%, transparent);
+}
+
+.mapdown-node.is-level-1.is-down {
+	--mapdown-node-glow: 0 calc(-0.2 * var(--mapdown-glow-size, 10px)) calc(0.65 * var(--mapdown-glow-size, 10px)) -8px color-mix(in srgb, var(--mapdown-branch-color, transparent) 20%, transparent);
+}
+
+.mapdown-node.is-level-1.is-down::before {
+	top: 0;
+	bottom: auto;
+	left: 0;
+	right: 0;
+	width: auto;
+	height: 6px;
+	max-width: none;
+	max-height: 100%;
+	background: linear-gradient(180deg,
+		color-mix(in srgb, var(--mapdown-branch-color, transparent) 30%, transparent),
+		color-mix(in srgb, var(--mapdown-branch-color, transparent) 8%, transparent) 40%,
+		transparent);
+}
+
+.mapdown-node.is-down .mapdown-node-badge {
+	top: calc(100% + 6px);
+	left: 50%;
+	right: auto;
+	margin-top: 0;
+	transform: translateX(-50%);
+}
+
+.mapdown-node.is-down .mapdown-node-toggle {
+	top: 100%;
+	left: 50%;
+	right: auto;
+	margin-top: 0;
+	margin-left: -8px;
+}

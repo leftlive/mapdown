@@ -20,6 +20,7 @@ Mapdown is an Obsidian plugin that opens your Markdown notes as editable mind ma
 - **Text and map stay in sync.** One click on the split button opens the note side by side: select a node and the Markdown jumps to its line; move the cursor in the text and the map follows.
 - **Maps inside your notes.** Write `![[My map]]`, or right-click and choose **Insert mind map…**, and the map shows up in the note as a live, zoomable map. Embed a whole map or just one branch.
 - **Tasks in the map.** `- [ ]` nodes get a checkbox, and parent nodes show progress like `2/5`.
+- **Present your map.** Walk the map branch by branch in fullscreen, jump to any node when someone asks, and show the whole map at the end.
 - **Focus Mode.** Press `F` and the map shows only the selected branch, with the rest faded away. Work through one idea at a time, then press `F` again to get the whole map back, right where you left it.
 - **Phones and tablets too.** Touch gestures and a node toolbar let you build and edit maps without a keyboard.
 - **Built for Obsidian.** Nodes render Markdown, images and `[[wikilinks]]`, with hover previews.
@@ -68,11 +69,13 @@ When you open an ordinary note as a mind map, Mapdown asks first. You can conver
 - **Quotes and callouts** in nodes look as they do in reading view.
 - **Math:** inline `$…$` and block `$$…$$` formulas render in nodes, including blocks over several lines.
 - **Branch color styles:** besides the edges, branch colors can also go on node borders, or tint the nodes with a light fill that fades toward the outer levels.
+- **Layout directions:** both sides, right, left, clockwise, or downward like an org chart. Each map keeps its own direction, set from the toolbar.
 - **Paste an outline:** a multi-line list pasted into the map becomes a subtree.
 - **Images:** paste, drag in, or run **Insert image…**.
 - **Large maps:** collapse to any level with `Alt + 1…6`, search inside collapsed branches, and jump around with the overview on maps over 300 nodes.
 - **XMind:** import `.xmind` files (XMind 2020+, Zen and XMind 8) as new notes, and export maps back to `.xmind`.
 - **Export:** PNG and JPEG at 1x, 2x or 4x, SVG, PDF, or a self-contained HTML page. On desktop, Mapdown asks where to save by default, and tells you when the export is done.
+- **Canvas:** export a map to an Obsidian Canvas, one card per node, and keep arranging it there.
 
 ![Several nodes selected with a box on the canvas](docs/screenshots/mapdown-multiselect.png)
 
@@ -111,7 +114,7 @@ Every action is also a command, so you can find it in the command palette and as
 | Heading levels | How many top levels are saved as Markdown headings; deeper nodes become list items |
 | Font size | Base text size; each level scales from it |
 | Node glow and maximum width | How selected nodes glow and where long text wraps |
-| Layout direction | Both sides, right, left, or clockwise |
+| Default layout direction | Both sides, right, left, clockwise or downward, for maps that have not set their own |
 | Branch colors | Color preset for branches |
 | Branch color style | Edges only, borders, or tinted nodes |
 | Center after moving | Recenter on a node after it moves |

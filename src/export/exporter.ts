@@ -111,7 +111,7 @@ export async function exportMap(view: MapView, format: ExportFormat, scale: numb
 	}
 }
 
-/** The toolbar's export menu (spec 5.1): PNG (HQ), JPEG (HQ), SVG, PDF, HTML, XMind. "HQ" is scale 4 (fix B2). */
+/** The toolbar's export menu (spec 5.1): PNG (HQ), JPEG (HQ), SVG, PDF, HTML, XMind, Canvas. "HQ" is scale 4 (fix B2). */
 export function showExportMenu(view: MapView): void {
 	if (!view.canEdit()) return;
 	const button = view.contentEl.querySelector<HTMLElement>('.mapdown-toolbar [data-action="export"]');
@@ -129,6 +129,8 @@ export function showExportMenu(view: MapView): void {
 		view.app.workspace.setActiveLeaf(view.leaf, { focus: true });
 		(view.app as unknown as { commands: { executeCommandById(id: string): boolean } }).commands.executeCommandById('mapdown:export-xmind');
 	});
+	// spec 2.3 "白板导出": after XMind
+	add(t('export-menu-canvas'), 'layout-dashboard', () => void view.exportCanvas());
 	const r = button?.getBoundingClientRect();
 	if (r) menu.showAtPosition({ x: r.left, y: r.bottom }, view.contentEl.ownerDocument);
 	else menu.showAtPosition({ x: 0, y: 0 }, view.contentEl.ownerDocument);
@@ -488,4 +490,74 @@ async function withTimeout<T>(ctx: Context, p: Promise<T>, ms: number): Promise<
 	} finally {
 		ctx.win.clearTimeout(timer);
 	}
+}
+
+// ---------------------------------------------------------------- canvas export sizes
+
+/**
+ * Map size of every node of the whole tree, collapsed branches included, for
+ * the canvas export (spec 2.3 "白板导出"): the placed size of a node drawn on
+ * screen; any other node (collapsed, or virtualized away) is measured the way
+ * this export measures, at the wrap width with its checkbox, progress label and
+ * map cards. Throws Cancelled once `signal` aborts or the view closes.
+ */
+export async function canvasNodeSizes(view: MapView, file: TFile, signal: AbortSignal): Promise<Map<string, Size>> {
+	const doc = view.contentEl.ownerDocument;
+	const ctx: Context = { view, app: view.app, file, doc, win: doc.defaultView ?? window, signal };
+	const root = view.session.doc.root;
+	const index = indexNodes(root);
+	const sizes = new Map<string, Size>();
+	const lay = view.renderer?.layoutSnapshot() ?? null;
+	const rendered = new Set(view.renderer?.renderedIds() ?? []);
+	const todo: string[] = [];
+	for (const id of index.keys()) {
+		const p = lay?.nodes.get(id);
+		if (p && rendered.has(id)) sizes.set(id, { width: p.width, height: p.height });
+		else todo.push(id);
+	}
+	if (todo.length === 0) return sizes;
+
+	const settings = view.plugin.settings;
+	const theme = readTheme(ctx);
+	const measurer = createMeasurer(doc, theme);
+	const counts = settings.showTaskProgress ? taskProgress(root) : null;
+	const cards = view.cardLabels();
+	const maxWidth = view.renderer?.layoutParams()?.nodeMaxWidth ?? settings.nodeMaxWidth;
+	const images = new Map<string, ResolvedImage | null>();
+	for (const id of todo) {
+		const entry = index.get(id);
+		if (!entry) continue;
+		const isVirtualRoot = entry.node === root && view.session.doc.virtualRoot;
+		const text = isVirtualRoot ? view.session.rootName : entry.node.text;
+		const task = taskOf(text, entry.node.kind);
+		const own = task ? text.slice(task.length) : text;
+		const parsed = parseBlocks(entry.node.kind === 'code' ? own : markCards(own, cards), entry.node.kind);
+		const blocks = task?.done ? markTaskDone(parsed) : parsed;
+		for (const b of blocks) {
+			if (b.type !== 'image') continue;
+			const key = imageKey(b);
+			if (images.has(key)) continue;
+			images.set(key, await loadImage(ctx, b));
+			check(ctx);
+		}
+		const font = fontFor(entry.depth, settings.fontSize);
+		const count = counts?.get(id);
+		const label = count ? `${count.done}/${count.total}` : null;
+		const lf = progressFont(font);
+		const side = decorWidths(task || label ? { task: task !== null, progress: label } : null, font, (s) => measurer.text(s, {}, lf.px, lf.weight));
+		const wrapWidth = Math.max(1, textWrapWidth(maxWidth, font, side));
+		const natural = layoutContent({
+			blocks,
+			innerWidth: wrapWidth,
+			wrapWidth,
+			fontPx: font.px,
+			lineHeight: font.px * LINE_HEIGHT,
+			measure: (s, style) => measurer.text(s, style, font.px, font.weight),
+			measureMono: (s) => measurer.mono(s, font.px),
+			image: (b) => images.get(imageKey(b)) ?? null,
+			theme,
+		});
+		sizes.set(id, boxSize(natural.width + side.lead + side.tail, natural.height, font, maxWidth));
+	}
+	return sizes;
 }

@@ -5,7 +5,8 @@
 import { clampHeadLevel, type LineEnding } from '../core/outline.ts';
 import { parseDocument } from '../core/parse.ts';
 import { writeDocumentBody } from '../core/serialize.ts';
-import type { ParsedDoc } from '../core/types.ts';
+import { formatStateJson } from '../core/state.ts';
+import type { LayoutDirection, ParsedDoc } from '../core/types.ts';
 
 /** Base name (no `.md`) of the map saved next to a plain note; numbering on clash is `availablePath`'s. */
 export function newMapBaseName(basename: string, chinese: boolean): string {
@@ -13,8 +14,12 @@ export function newMapBaseName(basename: string, chinese: boolean): string {
 }
 
 /** The `mindmark-state` value: version 2 with `collapsed` (block ids, breadth first); other fields kept. */
-export function stateJson(collapsed: readonly string[] = [], extra: Record<string, unknown> = {}): string {
-	return JSON.stringify({ ...extra, version: 2, collapsed: [...collapsed] });
+export function stateJson(
+	collapsed: readonly string[] = [],
+	extra: Record<string, unknown> = {},
+	layout?: LayoutDirection | null,
+): string {
+	return formatStateJson(collapsed, layout, extra);
 }
 
 const OWN_KEY = /^(["']?)(mindmap-plugin|mindmark-state)\1[ \t]*:/;

@@ -52,10 +52,10 @@ export function hitTest(nodes: ReadonlyMap<string, Placed>, p: Point, exclude: R
 	return null;
 }
 
-/** Quarter rule (behaviour spec 4.1): top quarter before, bottom quarter after, middle child. */
-export function dropPlace(target: Rect, p: Point, isRoot: boolean): DropPlace {
+/** Quarter rule (behaviour spec 4.1, 9.1): top/bottom (or left/right in downward) quarter, middle child. */
+export function dropPlace(target: Rect, p: Point, isRoot: boolean, down = false): DropPlace {
 	if (isRoot) return "child";
-	const rel = (p.y - target.y) / Math.max(1, target.height);
+	const rel = down ? (p.x - target.x) / Math.max(1, target.width) : (p.y - target.y) / Math.max(1, target.height);
 	if (rel < 0.25) return "before";
 	if (rel > 0.75) return "after";
 	return "child";

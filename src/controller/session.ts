@@ -17,7 +17,7 @@ import { findNodeAt, assignBlockId, uniqueBlockId, type OpResult } from '../core
 import { parseDocument } from '../core/parse.ts';
 import { reconcile } from '../core/reconcile.ts';
 import { createViewState, pruneSelection, stateLineEdit, type ViewState } from '../core/state.ts';
-import type { MapNode, ParsedDoc, TextEdit } from '../core/types.ts';
+import type { LayoutDirection, MapNode, ParsedDoc, TextEdit } from '../core/types.ts';
 import { History, type SelectionSnapshot } from '../history.ts';
 import { applyTextEdits, composeEdits, diffTexts, invertEdits, sortEdits } from './textEdits.ts';
 
@@ -99,6 +99,7 @@ function mapAnchor(pos: number, edits: readonly TextEdit[]): number {
 export function collapseSteps(
 	target: ReadonlySet<string> | ((doc: ParsedDoc) => ReadonlySet<string>),
 	random: () => number = Math.random,
+	layout?: LayoutDirection | null,
 ): StepFn[] {
 	const resolve = (doc: ParsedDoc): ReadonlySet<string> => (typeof target === 'function' ? target(doc) : target);
 	let wanted: string[] = [];
@@ -138,7 +139,7 @@ export function collapseSteps(
 				}
 				level = next;
 			}
-			const edits = stateLineEdit(doc.text, doc.frontmatter, blockIds);
+			const edits = stateLineEdit(doc.text, doc.frontmatter, blockIds, layout);
 			return { result: { edits, inverse: invertEdits(doc.text, edits), anchors: [] }, passive: true };
 		},
 	];

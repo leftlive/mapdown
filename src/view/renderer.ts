@@ -11,10 +11,12 @@ import { Platform, setIcon } from "obsidian";
 import type { LayoutDirection, MapNode, Point, Size } from "../core/types.ts";
 import { taskOf } from "../core/tasks.ts";
 import { CARD_MARK, CARD_MARKS, cardSlots, type CardSlot } from "../core/mapCard.ts";
-import { branchLook, createLayouter, type LayoutInput, type LayoutResult, type NodePlacement } from "../core/layout.ts";
+import { branchLook, createLayouter, edgePath, type LayoutInput, type LayoutResult, type NodePlacement } from "../core/layout.ts";
+import type { PresentLook } from "../core/presentation.ts";
 import {
 	DOM,
 	type CreateRenderer,
+	type PresentCamera,
 	type DropPlace,
 	type EditorHandle,
 	type MapRenderer,
@@ -51,9 +53,12 @@ import {
 	anchorPoint,
 	anchorShift,
 	centerOnRect,
+	topOnRect,
 	clampZoom,
 	focusViewport,
 	fitBounds,
+	flightViewport,
+	presentViewport,
 	revealRect,
 	uncoveredArea,
 	toWorld,
@@ -84,8 +89,10 @@ const REVEAL_PAD = 40;
 const FIT_PAD = 40;
 /** Focus mode never zooms out further than this to show the subtree (spec 5.3). */
 const FOCUS_MIN_ZOOM = 0.5;
-/** Floating UI over the map; "show on screen" moves use only the area they leave free (spec 5.1). */
-const COVERING_UI = [DOM.toolbar, DOM.mobileToolbar, DOM.minimap];
+/** Floating UI over the map; "show on screen" moves use only the area they leave free (spec 5.1, 5.13). */
+const COVERING_UI = [DOM.toolbar, DOM.mobileToolbar, DOM.minimap, DOM.presentBar, DOM.presentCrumbs];
+/** Camera flight between presentation steps (spec 5.13). */
+const PRESENT_FLIGHT_MS = 400;
 const EDGE_PAD = 20;
 
 const CLS = {
@@ -107,6 +114,7 @@ const CLS = {
 	cardName: "mapdown-map-card-name",
 	cardArrow: "mapdown-map-card-arrow",
 	left: "is-left",
+	down: "is-down",
 	entering: "is-entering",
 	animating: "is-animating",
 	dragging: "is-dragging",
@@ -291,7 +299,7 @@ class Renderer implements MapRenderer {
 	/** A map card was pressed (spec 5.10); its click opens the map. */
 	private cardDown: number | null = null;
 	/** Focus mode on a non-root node: the side and colour its branch has in the whole map. */
-	private focusLook: { side: "left" | "right"; color: string } | null = null;
+	private focusLook: { side: "left" | "right" | "down"; color: string } | null = null;
 	private lay: LayoutResult | null = null;
 	private colors = new Map<string, string>();
 	private views = new Map<string, NodeView>();
@@ -326,6 +334,12 @@ class Renderer implements MapRenderer {
 	private measureFont = "";
 	private fontFamily = "";
 	private svgBox = "";
+	/** Presentation mode (spec 5.13): the current step's look and camera, and the camera flight in progress. */
+	private present: PresentLook | null = null;
+	private presentCam: PresentCamera | null = null;
+	private flight: number | null = null;
+	/** Pan and zoom when presenting began, with the view size then; put back when it ends. */
+	private presentRestore: { vp: Viewport; width: number; height: number } | null = null;
 
 	constructor(container: HTMLElement, host: RenderHost, events: RenderEvents) {
 		this.host = host;
@@ -395,6 +409,8 @@ class Renderer implements MapRenderer {
 				this.height = entry.contentRect.height;
 			}
 			if (!this.centered && !this.userMoved && this.width > 0 && this.lay) this.place();
+			// presenting: the current step is framed again in the new size (spec 5.13)
+			else if (this.presentCam && this.width > 0 && this.height > 0) this.aimPresentation(false);
 			else if (oldW > 0 && oldH > 0 && this.width > 0 && this.height > 0) {
 				// Keep the point at the middle of the view in the middle when the pane resizes (split, sidebar).
 				const dx = (this.width - oldW) / 2;
@@ -505,7 +521,7 @@ class Renderer implements MapRenderer {
 		const focus = this.layoutRoot ? lay?.nodes.get(this.layoutRoot) : undefined;
 		if (!lay || !focus || this.width <= 0 || this.height <= 0) return;
 		this.centered = true;
-		const side = this.focusLook?.side ?? "root";
+		const side = this.focusLook?.side ?? (this.model?.direction === "down" ? "down" : "root");
 		this.setViewport(focusViewport(this.vp, lay.bounds, focus, side, this.area(), FIT_PAD, FOCUS_MIN_ZOOM));
 		this.refreshWindowNow();
 	}
@@ -516,7 +532,11 @@ class Renderer implements MapRenderer {
 		const p = lay.nodes.get(id ?? this.layoutRoot ?? "") ?? (this.layoutRoot ? lay.nodes.get(this.layoutRoot) : undefined);
 		if (!p) return;
 		if (this.width > 0) this.centered = true;
-		this.setViewport(centerOnRect(this.vp, p, this.area()));
+		const area = this.area();
+		const isRoot = !!this.model && (id ?? this.model.root.id) === this.model.root.id && this.layoutRoot === this.model.root.id;
+		// Downward layout (spec 9.1): the root goes to the top so the subtree has room below it.
+		const top = isRoot && this.model?.direction === "down";
+		this.setViewport(top ? topOnRect(this.vp, p, area, Math.max(area.height * 0.1, FIT_PAD)) : centerOnRect(this.vp, p, area));
 		this.refreshWindowNow();
 	}
 
@@ -528,15 +548,115 @@ class Renderer implements MapRenderer {
 	}
 
 	zoomBy(factor: number, at?: Point): void {
+		this.stopFlight();
 		this.userMoved = true;
 		this.setViewport(zoomAt(this.vp, factor, at ?? { x: this.width / 2, y: this.height / 2 }));
 	}
 
-	fit(): void {
+	fit(maxZoom = 1): void {
 		if (!this.lay) return;
 		this.userMoved = true;
-		this.setViewport(fitBounds(this.lay.bounds, this.area(), FIT_PAD));
+		this.setViewport(fitBounds(this.lay.bounds, this.area(), FIT_PAD, maxZoom));
 		this.refreshWindowNow();
+	}
+
+	setPresentation(look: PresentLook | null): void {
+		const was = this.present !== null;
+		this.present = look;
+		this.gestures.presenting = look !== null;
+		if (look && !was) {
+			this.gestures.abort();
+			this.clearBox();
+			this.presentRestore = { vp: { ...this.vp }, width: this.width, height: this.height };
+		}
+		if (!look) {
+			this.presentCam = null;
+			this.stopFlight();
+			const saved = this.presentRestore;
+			this.presentRestore = null;
+			// Measured against the size presenting began with: when leaving full screen resizes the view
+			// later, the keep-the-middle shift on resize lands exactly on the saved pan (spec 5.13).
+			if (saved) {
+				this.restoreViewport({
+					scale: saved.vp.scale,
+					x: saved.vp.x + (this.width - saved.width) / 2,
+					y: saved.vp.y + (this.height - saved.height) / 2,
+				});
+			}
+		}
+		for (const view of this.views.values()) {
+			this.presentClass(view.el, view.id, true);
+			if (look) {
+				// selection and search are not drawn while presenting; the next update draws them again
+				view.el.removeClass(DOM.selected, DOM.primary, DOM.searchMatch, DOM.searchCurrent);
+				view.el.setAttr("aria-selected", "false");
+				view.selected = false;
+				view.primary = false;
+			}
+		}
+		for (const [id, pv] of this.paths) {
+			this.presentClass(pv.el, id, false);
+		}
+	}
+
+	presentCamera(camera: PresentCamera, animate: boolean): void {
+		this.presentCam = camera;
+		this.aimPresentation(animate);
+	}
+
+	/** A node or edge (keyed by its child) while presenting: normal or faded; a node also its ring. */
+	private presentClass(el: Element, id: string, node: boolean): void {
+		const look = this.present;
+		el.classList.toggle(DOM.presentDim, look !== null && look.normal !== null && !look.normal.has(id));
+		el.classList.toggle(DOM.presentCurrent, node && look !== null && look.current === id);
+		el.classList.toggle(DOM.presentLeaf, node && look !== null && look.leaf === id);
+	}
+
+	private aimPresentation(animate: boolean): void {
+		const cam = this.presentCam;
+		const lay = this.lay;
+		if (!cam || !lay || this.width <= 0 || this.height <= 0) return;
+		let box: Rect | null = cam.camera === null ? lay.bounds : null;
+		for (const id of cam.camera ?? []) {
+			const p = lay.nodes.get(id);
+			if (!p) continue;
+			if (!box) box = { x: p.x, y: p.y, width: p.width, height: p.height };
+			else {
+				const x = Math.min(box.x, p.x);
+				const y = Math.min(box.y, p.y);
+				box = { x, y, width: Math.max(box.x + box.width, p.x + p.width) - x, height: Math.max(box.y + box.height, p.y + p.height) - y };
+			}
+		}
+		if (!box) return;
+		this.centered = true;
+		const target = presentViewport(box, this.area(), FIT_PAD, cam.minZoom, cam.maxZoom);
+		// the last press wins: a flight in progress is cut short and the new one starts from here
+		this.stopFlight();
+		if (!animate || this.host.reducedMotion()) {
+			this.setViewport(target);
+			this.refreshWindowNow();
+			return;
+		}
+		const from = this.vp;
+		const centre = { x: this.width / 2, y: this.height / 2 };
+		const start = this.win.performance.now();
+		const frame = (now: number): void => {
+			if (this.destroyed) return;
+			const t = Math.min(1, (now - start) / PRESENT_FLIGHT_MS);
+			this.setViewport(flightViewport(from, target, centre, t));
+			if (t < 1) {
+				this.flight = this.win.requestAnimationFrame(frame);
+				return;
+			}
+			this.flight = null;
+			this.refreshWindowNow();
+		};
+		this.flight = this.win.requestAnimationFrame(frame);
+	}
+
+	private stopFlight(): void {
+		if (this.flight !== null) this.win.cancelAnimationFrame(this.flight);
+		this.flight = null;
 	}
 
 	startEditing(id: string, text: string, caret: "end" | "all"): EditorHandle {
@@ -630,6 +750,10 @@ class Renderer implements MapRenderer {
 		this.edit?.abort.abort();
 		this.edit = null;
 		this.editId = null;
+		this.stopFlight();
+		this.present = null;
+		this.presentCam = null;
+		this.presentRestore = null;
 		this.gestures.abort();
 		this.abort.abort();
 		this.resizeObserver.disconnect();
@@ -1108,7 +1232,9 @@ class Renderer implements MapRenderer {
 	}
 
 	private writeNodes(model: RenderModel, lay: LayoutResult, dom: ReadonlySet<string>, entering: Set<string> | null): void {
-		const selected = new Set(model.selection);
+		// presenting (spec 5.13): no selection or search highlight is drawn
+		const presenting = this.present !== null;
+		const selected = new Set(presenting ? [] : model.selection);
 		const focusTarget = model.primary && dom.has(model.primary) ? model.primary : this.layoutRoot;
 		for (const id of dom) {
 			const view = this.views.get(id);
@@ -1138,6 +1264,7 @@ class Renderer implements MapRenderer {
 			const side = id === this.layoutRoot && this.focusLook ? this.focusLook.side : p.side;
 			if (side !== view.side) {
 				view.el.toggleClass(CLS.left, side === "left");
+				view.el.toggleClass(CLS.down, side === "down");
 				view.side = side;
 			}
 			const level = item.depth + 1;
@@ -1151,14 +1278,15 @@ class Renderer implements MapRenderer {
 				view.el.setAttr("aria-selected", isSel ? "true" : "false");
 				view.selected = isSel;
 			}
-			const isPrimary = model.primary === id;
+			const isPrimary = !presenting && model.primary === id;
 			if (isPrimary !== view.primary) {
 				view.el.toggleClass(DOM.primary, isPrimary);
 				view.primary = isPrimary;
 			}
 			// search highlight and focus node (classList.toggle with force is a no-op when unchanged)
-			view.el.classList.toggle(DOM.searchMatch, model.searchMatches?.has(id) ?? false);
-			view.el.classList.toggle(DOM.searchCurrent, model.searchCurrent === id);
+			view.el.classList.toggle(DOM.searchMatch, !presenting && (model.searchMatches?.has(id) ?? false));
+			view.el.classList.toggle(DOM.searchCurrent, !presenting && model.searchCurrent === id);
+			this.presentClass(view.el, id, true);
 			view.el.classList.toggle(DOM.focusRoot, model.focusId === id);
 			const tab = id === focusTarget && !model.readOnly ? 0 : -1;
 			if (tab !== view.tab) {
@@ -1206,18 +1334,18 @@ class Renderer implements MapRenderer {
 			// a preview draws only the dashed edges into the placeholders, not inside the moved subtrees
 			if (preview && isPhantom(e.parentId)) continue;
 			seen.add(e.childId);
-			const d = `M ${r2(e.from.x)} ${r2(e.from.y)} C ${r2(e.c1.x)} ${r2(e.c1.y)}, ${r2(e.c2.x)} ${r2(e.c2.y)}, ${r2(e.to.x)} ${r2(e.to.y)}`;
+			const fromRoot = e.parentId === root;
+			const drop = preview && isPhantom(e.childId);
+			const d = edgePath(e);
 			let pv = this.paths.get(e.childId);
 			if (!pv) {
 				pv = { el: this.svg.createSvg("path"), d: "", color: "", fromRoot: false, drop: false };
 				this.paths.set(e.childId, pv);
 			}
-			const drop = preview && isPhantom(e.childId);
 			if (drop !== pv.drop) {
 				pv.el.toggleClass(CLS.dropEdge, drop);
 				pv.drop = drop;
 			}
-			const fromRoot = e.parentId === root;
 			if (fromRoot !== pv.fromRoot) {
 				pv.el.toggleClass(CLS.rootEdge, fromRoot);
 				pv.fromRoot = fromRoot;
@@ -1231,6 +1359,7 @@ class Renderer implements MapRenderer {
 				pv.el.setAttribute("stroke", e.color);
 				pv.color = e.color;
 			}
+			this.presentClass(pv.el, e.childId, false);
 		}
 		for (const [id, pv] of this.paths) {
 			if (seen.has(id)) continue;
@@ -1323,6 +1452,7 @@ class Renderer implements MapRenderer {
 
 	private panBy(dx: number, dy: number): void {
 		if (dx === 0 && dy === 0) return;
+		this.stopFlight();
 		this.userMoved = true;
 		this.setViewport({ x: this.vp.x + dx, y: this.vp.y + dy, scale: this.vp.scale });
 	}
@@ -1342,6 +1472,7 @@ class Renderer implements MapRenderer {
 
 	/** Anchor point of a placed node; the focus-mode root counts as a node on its branch's side. */
 	private anchorOf(p: NodePlacement): Point {
+		if (this.model?.direction === "down") return anchorPoint(p, "down");
 		return anchorPoint(p, p.id === this.layoutRoot && this.focusLook ? this.focusLook.side : p.side);
 	}
 
@@ -1534,6 +1665,24 @@ class Renderer implements MapRenderer {
 	private onPointerDown(e: PointerEvent): void {
 		if (this.inEditor(e.target)) return;
 		this.taskDown = null;
+		this.cardDown = null;
+		// presenting (spec 5.13): collapse handles toggle the presentation's folds; everything else on a
+		// node (links, cards, checkboxes) is a click on that node, and drags pan
+		if (this.present) {
+			this.stopFlight();
+			if (this.collapseHandle(e.target) && e.button === 0 && !this.gestures.busy) {
+				e.preventDefault();
+				e.stopPropagation();
+				this.toggleDown = e.pointerId;
+				return;
+			}
+			if (!this.gestures.busy) this.gestureRect = this.rootEl.getBoundingClientRect();
+			this.linkDown = null;
+			this.lastEvent = e;
+			if (e.button === 1) e.preventDefault();
+			this.gestures.down(this.input(e, this.targetOf(e.target)));
+			return;
+		}
 		// the collapse dot and the count pill toggle on click; they never select or drag
 		if (this.collapseHandle(e.target) && e.button === 0 && !this.gestures.busy) {
 			e.preventDefault();
@@ -1549,7 +1698,6 @@ class Renderer implements MapRenderer {
 			return;
 		}
 		// and a map card (spec 5.10), which opens its map on click, read-only maps included
-		this.cardDown = null;
 		if (this.cardOf(e.target) && e.button === 0 && !this.gestures.busy) {
 			e.preventDefault();
 			e.stopPropagation();
@@ -1599,6 +1747,10 @@ class Renderer implements MapRenderer {
 	}
 
 	private onContextMenu(e: MouseEvent): void {
+		if (this.present) {
+			e.preventDefault();
+			return;
+		}
 		if (this.inEditor(e.target) || this.model?.readOnly) return;
 		e.preventDefault();
 		const id = this.gestures.nativeContextMenu(this.targetOf(e.target));
@@ -1607,7 +1759,7 @@ class Renderer implements MapRenderer {
 
 	/** The pointer entered an internal link of a node: the controller hands it to the page preview. */
 	private onLinkHover(e: MouseEvent): void {
-		if (this.inEditor(e.target) || !isElement(e.target)) return;
+		if (this.present || this.inEditor(e.target) || !isElement(e.target)) return;
 		const link = e.target.closest<HTMLElement>("a.internal-link");
 		if (!link || !this.canvas.contains(link) || !this.events.linkHover) return;
 		const href = link.getAttribute("data-href") ?? link.getAttribute("href") ?? "";
@@ -1630,6 +1782,16 @@ class Renderer implements MapRenderer {
 
 	private onNativeClick(e: MouseEvent): void {
 		if (this.inEditor(e.target)) return;
+		// presenting (spec 5.13): links, cards and checkboxes do nothing natively; collapse handles toggle
+		if (this.present) {
+			if (isNode(e.target) && this.canvas.contains(e.target)) e.preventDefault();
+			if (this.collapseHandle(e.target)) {
+				const t = this.targetOf(e.target);
+				if (this.toggleDown !== null && t.kind === "node" && e.button === 0) this.events.toggleCollapse?.(t.id);
+				this.toggleDown = null;
+			}
+			return;
+		}
 		const card = this.cardOf(e.target);
 		if (card) {
 			e.preventDefault();
@@ -1665,6 +1827,11 @@ class Renderer implements MapRenderer {
 		};
 		return {
 			click: (target, mods) => {
+				// presenting (spec 5.13): a node click jumps there, links included; the background does nothing
+				if (this.present) {
+					if (target.kind === "node") this.events.presentClick?.(target.id);
+					return;
+				}
 				if (target.kind === "background") {
 					this.events.backgroundClick();
 					return;
@@ -1708,6 +1875,7 @@ class Renderer implements MapRenderer {
 				this.dragDrop(mods);
 			},
 			dragCancel: () => this.dragClear(),
+			swipe: (dir) => this.events.swipe?.(dir),
 		};
 	}
 
@@ -1838,7 +2006,8 @@ class Renderer implements MapRenderer {
 		// hit-test the layout from drag start: siblings making room never change the target
 		const world = toWorld(this.vp, at);
 		const hit = hitTest(d.frozen.nodes, world, d.exclude);
-		const target = hit && this.items.has(hit.id) ? { id: hit.id, place: dropPlace(hit, world, hit.id === this.layoutRoot) } : null;
+		const isDown = (this.focusLook?.side ?? this.model?.direction) === "down";
+		const target = hit && this.items.has(hit.id) ? { id: hit.id, place: dropPlace(hit, world, hit.id === this.layoutRoot, isDown) } : null;
 		const key = target ? `${target.id}|${target.place}|${d.copy ? "copy" : "move"}` : "";
 		if (key !== d.key) {
 			d.key = key;
@@ -1928,7 +2097,8 @@ class Renderer implements MapRenderer {
 			if (!isPhantom(key)) continue;
 			this.paths.delete(key);
 			const id = realId(key);
-			this.paths.get(id)?.el.remove();
+			const prev = this.paths.get(id);
+			prev?.el.remove();
 			pv.el.removeClass(CLS.dropEdge);
 			pv.drop = false;
 			this.paths.set(id, pv);
