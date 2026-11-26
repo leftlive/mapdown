@@ -28,3 +28,11 @@ video/out/
 video/zh/out/
 video/.om/
 video/zh/.om/
+video/promo-zh/out/
+video/promo-zh/.om/
+# old voice take (superseded by vo2) and join.py's copy of assets/voice.wav
+video/promo-zh/assets/vo/
+video/promo-zh/assets/vo2/voice.wav
+video/promo-en/out/
+video/promo-en/.om/
+video/promo-en/assets/vo/voice.wav

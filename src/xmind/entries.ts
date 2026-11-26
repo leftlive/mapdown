@@ -10,7 +10,7 @@ import type MapdownPlugin from '../main.ts';
 import { availableSiblingPath } from './paths.ts';
 import { importXmindFile, pickXmindFile } from './importFile.ts';
 import { buildXmindArchive, mapToXmindSheet, toExportTree } from './write.ts';
-import { MapView } from '../view/MapView.ts';
+import type { MapView } from '../view/MapView.ts';
 import { chooseTarget, discardTarget, explainFallback, progressNotice, showDone, writeTarget, type Target } from '../export/save.ts';
 
 const isXmind = (name: string): boolean => /\.xmind$/i.test(name);

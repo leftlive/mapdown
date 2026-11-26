@@ -21,4 +21,6 @@ export interface TestApi {
 	nodeAtLine(line: number): string | null;
 	/** Resolves when pending saves have been written. */
 	flush(): Promise<void>;
+	/** The heading Obsidian's link resolution finds for `subpath` (e.g. `#Title`) in the note at `path`, or null (contract 4.11.6 check). */
+	resolveHeading(path: string, subpath: string): string | null;
 }

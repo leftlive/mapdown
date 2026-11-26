@@ -17,7 +17,7 @@ import { MarkdownRenderer, MarkdownView, Menu, Notice, Platform, Scope, TextFile
 import { DEFAULT_PALETTE } from '../core/layout.ts';
 import { presentKeyAction } from '../core/presentation.ts';
 import { taskProgress, type TaskCount } from '../core/tasks.ts';
-import { childPosition, findNodeAt, insertNodes, insertSibling, moveNodes, pasteMarkdown, setText, type NodeInput, type Position } from '../core/ops.ts';
+import { childPosition, findNodeAt, insertNodes, insertSibling, moveNodes, pasteMarkdown, setText, summaryRefusal, type NodeInput, type Position } from '../core/ops.ts';
 import { parseDocument } from '../core/parse.ts';
 import {
 	clearFocus,
@@ -62,11 +62,14 @@ import type { MapdownSettings } from '../settings.ts';
 import { DIRECTION_VALUES } from '../settingsModel.ts';
 import { MobileToolbar } from './mobileToolbar.ts';
 import { MultiActionBar } from './multiActionBar.ts';
+import { MarkerPalette, type PaletteOrigin } from './markerPalette.ts';
 import { isMultiSelection } from './multiActions.ts';
 import { addImageFiles, installImageDrop, openImagePicker } from './nodeImages.ts';
 import { appendLine, extensionForMime, pastedImageName } from '../nodeImage.ts';
 import { createRenderer } from './renderer.ts';
 import { SearchBar } from './search.ts';
+import { promptFrameLabel } from './labelPrompt.ts';
+import { setIconFrom } from './icons.ts';
 import { Presentation } from './presentation.ts';
 import type { Viewport } from './viewport.ts';
 import { exportMap, showExportMenu, type ExportFormat } from '../export/exporter.ts';
@@ -134,6 +137,8 @@ export class MapView extends TextFileView implements KeyTarget, HoverParent {
 	private mobileBar: MobileToolbar | null = null;
 	/** Multi-selection actions (spec 5.11): the floating bar (desktop) and the right-click menu. */
 	private multiBar: MultiActionBar | null = null;
+	/** The marker palette (spec 5.14). */
+	private markerPalette: MarkerPalette | null = null;
 	private mapEl: HTMLElement | null = null;
 	private menuEl: HTMLElement | null = null;
 	private menuFor: string | null = null;
@@ -252,12 +257,15 @@ export class MapView extends TextFileView implements KeyTarget, HoverParent {
 		this.menuEl.hide();
 		this.buildMenu(this.menuEl);
 		this.multiBar = new MultiActionBar(el, this, !Platform.isMobile);
+		this.markerPalette = new MarkerPalette(el, this);
 		installImageDrop(this);
 		this.scope = new Scope(this.app.scope);
 		installKeymap(this.scope, this);
 		const doc = el.ownerDocument;
 		this.registerDomEvent(doc, 'keyup', (evt) => this.onKeyUp(evt));
 		this.registerDomEvent(doc, 'pointerdown', (evt) => {
+			// a press in the marker palette keeps it (and leaves the menus as they are)
+			if (this.markerPalette?.owns(evt.target)) return;
 			if (this.menuEl && !this.menuEl.contains(evt.target as Node) && !this.multiBar?.ownsTarget(evt.target)) this.hideMenu();
 		});
 		// a map card's label changed (spec 5.10)
@@ -281,6 +289,8 @@ export class MapView extends TextFileView implements KeyTarget, HoverParent {
 		this.mobileBar = null;
 		this.multiBar?.destroy();
 		this.multiBar = null;
+		this.markerPalette?.destroy();
+		this.markerPalette = null;
 		this.renderer?.destroy();
 		this.renderer = null;
 		await super.onClose();
@@ -527,6 +537,7 @@ export class MapView extends TextFileView implements KeyTarget, HoverParent {
 	private markdownEditor(): { view: MarkdownView; cm: EditorView } | null {
 		const file = this.file;
 		if (!file) return null;
+		// A deferred tab (not shown since a restart) is skipped: it has no editor and no unsaved typing.
 		for (const leaf of this.app.workspace.getLeavesOfType('markdown')) {
 			const view = leaf.view;
 			if (view instanceof MarkdownView && view.file?.path === file.path) {
@@ -663,6 +674,7 @@ export class MapView extends TextFileView implements KeyTarget, HoverParent {
 		if (!file) return null;
 		const active = this.app.workspace.getActiveViewOfType(MarkdownView);
 		if (active?.file?.path === file.path) return { view: active, cm: getEditorView(active) };
+		// A deferred tab is skipped (loading it would undo the deferral): it shows nothing yet to scroll or read a cursor from.
 		for (const leaf of this.app.workspace.getLeavesOfType('markdown')) {
 			const view = leaf.view;
 			if (view instanceof MarkdownView && view.file?.path === file.path) return { view, cm: getEditorView(view) };
@@ -767,6 +779,7 @@ export class MapView extends TextFileView implements KeyTarget, HoverParent {
 		this.updateToolbar();
 		this.mobileBar?.update();
 		this.multiBar?.update();
+		this.markerPalette?.refresh();
 		this.syncToText();
 	}
 
@@ -829,6 +842,21 @@ export class MapView extends TextFileView implements KeyTarget, HoverParent {
 				const node = indexNodes(this.session.doc.root).get(id)?.node;
 				// one character in the brackets; the selection stays as it is (spec 5.9)
 				if (node) this.runSteps(toggleTaskSteps([node]), { reveal: false, select: keepSelection(this.session) });
+			}),
+			// a node's marker (spec 5.14): select only that node and open the palette beside it
+			markerClick: live((id: string) => {
+				this.hideMenu();
+				this.commitEdit();
+				this.select([id], id, false);
+				this.renderer?.focusNode(id);
+				this.openMarkers({ node: true });
+			}),
+			// a frame's label pill (spec 5.15): select that node and edit the label
+			frameLabelDoubleClick: live((id: string) => {
+				this.hideMenu();
+				this.commitEdit();
+				this.select([id], id, false);
+				runCommand(this, 'edit-frame-label');
 			}),
 			nodeDoubleClick: live((id: string) => {
 				this.select([id], id, false);
@@ -898,6 +926,11 @@ export class MapView extends TextFileView implements KeyTarget, HoverParent {
 		button(edit, 'undo', 'undo-2', t('Undo'), () => this.undo());
 		button(edit, 'redo', 'redo-2', t('Redo'), () => this.redo());
 		button(edit, 'export', 'download', t('Export'), () => showExportMenu(this));
+		// spec 5.1, 5.14: the palette opens left of this button
+		button(edit, 'markers', 'smile-plus', t('markers'), () => {
+			const b = bar.querySelector(`[${DOM.actionAttr}="markers"]`);
+			if (b) this.openMarkers({ left: b.getBoundingClientRect() });
+		});
 		const view = bar.createDiv({ cls: 'mapdown-toolbar-group' });
 		button(view, 'zoom-in', 'zoom-in', t('Zoom in'), () => this.renderer?.zoomBy(1.2));
 		button(view, 'zoom-out', 'zoom-out', t('Zoom out'), () => this.renderer?.zoomBy(1 / 1.2));
@@ -907,6 +940,8 @@ export class MapView extends TextFileView implements KeyTarget, HoverParent {
 		// older Obsidian versions have no "presentation" icon (plan, stage 8)
 		const present = view.querySelector(`[${DOM.actionAttr}="present"]`);
 		if (present && !present.querySelector('svg')) setIcon(present as HTMLElement, 'monitor-play');
+		const markers = edit.querySelector(`[${DOM.actionAttr}="markers"]`);
+		if (markers && !markers.querySelector('svg')) setIcon(markers as HTMLElement, 'smile');
 	}
 
 	private updateToolbar(): void {
@@ -922,6 +957,7 @@ export class MapView extends TextFileView implements KeyTarget, HoverParent {
 		set('export', this.canEdit());
 		set('layout-direction', this.canEdit() && !this.isEditing() && !this.isPresenting());
 		set('present', this.canEdit());
+		set('markers', this.canEdit() && !this.isPresenting() && this.session.view.selection.primary !== null);
 		set('undo', this.session.history.undoSize > 0);
 		set('redo', this.session.history.redoSize > 0);
 	}
@@ -973,7 +1009,7 @@ export class MapView extends TextFileView implements KeyTarget, HoverParent {
 	private buildMenu(menu: HTMLElement): void {
 		const item = (action: string, icon: string, label: string, run: (id: string) => void): void => {
 			const b = menu.createEl('button', { cls: 'clickable-icon', attr: { [DOM.actionAttr]: action, 'aria-label': label } });
-			setIcon(b, icon);
+			setIconFrom(b, icon);
 			b.createSpan({ text: label });
 			b.addEventListener('click', (evt) => {
 				evt.preventDefault();
@@ -998,6 +1034,24 @@ export class MapView extends TextFileView implements KeyTarget, HoverParent {
 			this.select([id], id, false);
 			runCommand(this, 'insert-image');
 		});
+		item('markers', 'smile-plus', t('markers'), (id) => {
+			if (!this.session.view.selection.ids.includes(id)) this.select([id], id, false);
+			this.openMarkers({ node: true });
+		});
+		const markers = menu.querySelector(`[${DOM.actionAttr}="markers"]`);
+		if (markers && !markers.querySelector('svg')) setIcon(markers as HTMLElement, 'smile');
+		// summaries and frames (spec 5.15): on the node, or on the selection it is part of
+		const onSelection = (id: string): void => {
+			if (!this.session.view.selection.ids.includes(id)) this.select([id], id, false);
+		};
+		item('summary', 'brackets', t('summary'), (id) => {
+			onSelection(id);
+			runCommand(this, 'add-summary');
+		});
+		item('frame', 'square-dashed', t('frame'), (id) => {
+			onSelection(id);
+			runCommand(this, 'toggle-frame');
+		});
 	}
 
 	private showMenu(id: string): void {
@@ -1007,6 +1061,7 @@ export class MapView extends TextFileView implements KeyTarget, HoverParent {
 		const sel = this.session.view.selection.ids;
 		if (!sel.includes(id)) this.select([id], id, false);
 		this.menuFor = id;
+		this.markerPalette?.close();
 		this.multiBar?.hideMenu();
 		this.multiBar?.update();
 		const nodeEl = this.renderer?.nodeElement(id);
@@ -1023,11 +1078,34 @@ export class MapView extends TextFileView implements KeyTarget, HoverParent {
 	}
 
 	private hideMenu(): void {
+		this.markerPalette?.close();
 		const was = this.menuFor !== null;
 		this.menuFor = null;
 		this.menuEl?.hide();
 		this.multiBar?.hideMenu();
 		if (was) this.multiBar?.update();
+	}
+
+	/**
+	 * Open the marker palette (spec 5.14) for the selected nodes: an edit is committed first. Nothing
+	 * happens without a selection, while presenting, or in a map that cannot be edited.
+	 */
+	openMarkers(origin: PaletteOrigin): void {
+		if (!this.canEdit() || this.isPresenting() || !this.markerPalette) return;
+		this.commitEdit();
+		if (this.session.view.selection.primary === null) return;
+		this.hideMenu();
+		this.markerPalette.open(origin);
+	}
+
+	/** `1`–`5` (spec 5.14): a priority in the open marker palette; nothing when it is closed. */
+	markerDigit(n: number): void {
+		this.markerPalette?.digit(n);
+	}
+
+	/** Which side of the root a node is on ('left', 'right', 'down' or 'root'). */
+	nodeSide(id: string): string {
+		return sidesOf(this.session.doc.root, this.direction()).get(id) ?? 'root';
 	}
 
 	/** Whether the node menu or the multi-selection menu is open. */
@@ -1079,6 +1157,19 @@ export class MapView extends TextFileView implements KeyTarget, HoverParent {
 	}
 
 	/** Give the map keyboard focus (after open or when its tab becomes active). */
+	/** Whether the selection is adjacent siblings that can take a summary (spec 5.15; one a summary covers counts). */
+	summaryFits(): boolean {
+		const ids = this.selectedInOrder().map((n) => n.id);
+		return ids.length > 0 && summaryRefusal(this.session.doc, ids, this.direction()) !== 'siblings';
+	}
+
+	/** The "Boundary label" prompt (spec 5.15); `submit` runs on confirm, then the map has the focus again. */
+	promptFrameLabel(initial: string, submit: (label: string) => void): void {
+		promptFrameLabel(this.app, initial, submit, () => {
+			if (this.app.workspace.getActiveViewOfType(MapView) === (this as MapView)) this.focusMap();
+		});
+	}
+
 	focusMap(): void {
 		if (!this.loaded || this.unsupported || this.editing) return;
 		this.win.requestAnimationFrame(() => {
@@ -1346,6 +1437,11 @@ export class MapView extends TextFileView implements KeyTarget, HoverParent {
 			this.cancelEdit();
 			return;
 		}
+		// Esc closes the marker palette; the selection stays (spec 5.14)
+		if (this.markerPalette?.isOpen) {
+			this.markerPalette.close();
+			return;
+		}
 		if (this.isMenuOpen()) {
 			this.hideMenu();
 			return;
@@ -1381,7 +1477,12 @@ export class MapView extends TextFileView implements KeyTarget, HoverParent {
 			pos = { parentId: target.parent.id, index: at + (place === 'after' ? 1 : 0) };
 		}
 		if (copy) {
-			const toInput = (n: MapNode): NodeInput => ({ text: n.text, children: n.children.map(toInput) });
+			const toInput = (n: MapNode): NodeInput => ({
+				text: n.text,
+				children: n.children.map(toInput),
+				...(n.summary ? { summary: n.summary } : {}),
+				...(n.frame ? { frame: n.frame } : {}),
+			});
 			this.runSteps([(d) => {
 				const result = insertNodes(d, tops.map(toInput), pos, { headLevel: this.headLevel() });
 				return result ? { result } : null;

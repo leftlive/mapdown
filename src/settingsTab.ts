@@ -1,7 +1,7 @@
 // The settings tab (behaviour spec section 8, and 5.7 for the link preview
 // hint). The tab is described once, as setting definitions. Obsidian 1.13+
 // renders them itself and uses them for settings search. On older versions
-// (the plugin supports 1.5.7) it never calls getSettingDefinitions(), so
+// (the plugin supports 1.8.7) it never calls getSettingDefinitions(), so
 // display() draws the same definitions with the classic Setting API.
 
 import {
@@ -142,6 +142,11 @@ export class MapdownSettingTab extends PluginSettingTab {
 				type: 'group',
 				heading: t('set-group-embed'),
 				items: [this.row('embedMaps', { type: 'toggle' }), slider('embedHeight', 150, 1200, 50)],
+			},
+			{
+				type: 'group',
+				heading: t('set-group-markdown'),
+				items: [this.row('markdownNotes', { type: 'toggle' })],
 			},
 			{
 				type: 'group',

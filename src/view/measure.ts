@@ -42,6 +42,34 @@ export function isQuoteText(text: string): boolean {
 	return lines.every((l) => QUOTE_LINE.test(l));
 }
 
+/** Estimated width of a quote's bar (`--blockquote-border-thickness` is 2px by default); the DOM size replaces it. */
+export const QUOTE_BAR_PX = 2;
+/** The gap between a quote's bar and its text, in em (spec 5.6). */
+export const QUOTE_GAP_EM = 0.6;
+
+/** A callout's first line: `> [!type]`. Callouts have no quote bar (spec 5.6). */
+const CALLOUT_LINE = /^ *>[ \t]*\[!/;
+
+/**
+ * How many quote bars the text shows: 0 when it is no quote or a callout,
+ * otherwise the deepest nesting (`> > a` is 2). Every level has a bar and a gap.
+ */
+export function quoteBarLevels(text: string): number {
+	if (!isQuoteText(text) || CALLOUT_LINE.test(text)) return 0;
+	let levels = 1;
+	for (const line of text.replace(/(\r?\n)+$/, "").split(/\r?\n/)) {
+		const m = /^ *((?:> ?)+)/.exec(line);
+		const n = m ? (m[1].match(/>/g) ?? []).length : 1;
+		if (n > levels) levels = n;
+	}
+	return levels;
+}
+
+/** Width the bars and gaps of a quote take left of its text. */
+export function quoteInset(levels: number, fontPx: number, barPx = QUOTE_BAR_PX): number {
+	return levels * (barPx + QUOTE_GAP_EM * fontPx);
+}
+
 /** A closed `$$ … $$` span; line breaks inside it must stay real newlines for MathJax. */
 const DISPLAY_MATH = /\$\$[\s\S]*?\$\$/g;
 
@@ -122,25 +150,92 @@ export const PROGRESS_SCALE = 0.75;
 export const PROGRESS_GAP_EM = 0.6;
 export const PROGRESS_WEIGHT = 400;
 
-/** What sits beside a node's text: a checkbox in front, a "done/total" label after. */
+/**
+ * Node markers (spec 5.14), in em of the node's font: each emoji at 1.15 times
+ * the font size (weight 400), 0.25em between two, 0.4em before the text. Keep
+ * in sync with `.mapdown-node-markers` in styles.css.
+ */
+export const MARKER_SCALE = 1.15;
+export const MARKER_GAP_EM = 0.25;
+export const MARKER_AFTER_EM = 0.4;
+export const MARKER_WEIGHT = 400;
+
+/** What sits beside a node's text: a checkbox and markers in front, a "done/total" label after. */
 export interface NodeDecor {
 	task: boolean;
 	/** E.g. "2/5"; null when the node shows no progress. */
 	progress: string | null;
+	/** Markers before the text (after the checkbox); absent or empty for none. */
+	markers?: readonly string[];
+	/** Nothing follows the markers: no gap after the last one. */
+	markersOnly?: boolean;
 }
 
-/** Widths taken in front of (`lead`) and after (`tail`) the text; `measureLabel` measures at the label's font. */
-export function decorWidths(decor: NodeDecor | null, font: NodeFont, measureLabel: (s: string) => number): { lead: number; tail: number } {
+/** Font of a node's markers (for measuring them). */
+export function markerFont(font: NodeFont): NodeFont {
+	return { ...font, px: font.px * MARKER_SCALE, weight: MARKER_WEIGHT };
+}
+
+/**
+ * Offsets of the markers from the start of their run, and the run's width
+ * including the gap before the text (none when `alone`). `measure` measures
+ * at the markers' font.
+ */
+export function markerRun(markers: readonly string[], font: NodeFont, measure: (s: string) => number, alone = false): { xs: number[]; width: number } {
+	const xs: number[] = [];
+	let x = 0;
+	markers.forEach((m, i) => {
+		if (i > 0) x += MARKER_GAP_EM * font.px;
+		xs.push(x);
+		x += measure(m);
+	});
+	if (markers.length > 0 && !alone) x += MARKER_AFTER_EM * font.px;
+	return { xs, width: x };
+}
+
+/**
+ * Widths taken in front of (`lead`) and after (`tail`) the text; `measureLabel` measures at the label's
+ * font, `measureMarker` at the markers' (`markerFont`; without it an emoji is taken as 1em of that font).
+ */
+export function decorWidths(
+	decor: NodeDecor | null,
+	font: NodeFont,
+	measureLabel: (s: string) => number,
+	measureMarker: (s: string) => number = () => font.px * MARKER_SCALE,
+): { lead: number; tail: number } {
 	if (!decor) return { lead: 0, tail: 0 };
+	const markers = decor.markers && decor.markers.length > 0 ? markerRun(decor.markers, font, measureMarker, decor.markersOnly).width : 0;
 	return {
-		lead: decor.task ? (TASK_BOX_EM + TASK_GAP_EM) * font.px : 0,
+		lead: (decor.task ? (TASK_BOX_EM + TASK_GAP_EM) * font.px : 0) + markers,
 		tail: decor.progress !== null ? PROGRESS_GAP_EM * PROGRESS_SCALE * font.px + measureLabel(decor.progress) : 0,
 	};
 }
 
 /** The decor's part of a size key: done or open draws the same width, so it is left out. */
 export function decorKey(decor: NodeDecor | null): string {
-	return decor ? `${decor.task ? "t" : "-"}${decor.progress ?? ""}|` : "";
+	if (!decor) return "";
+	const markers = decor.markers && decor.markers.length > 0 ? `${decor.markers.join(" ")}${decor.markersOnly ? "!" : ""}` : "";
+	return `${decor.task ? "t" : "-"}${decor.progress ?? ""}|${markers ? `${markers}|` : ""}`;
+}
+
+/**
+ * A frame's label pill (spec 5.15): 0.8 times the framed node's font, padding
+ * 4 px by 8 px, line height 1. Keep in sync with `.mapdown-frame-label` in styles.css.
+ */
+export const LABEL_SCALE = 0.8;
+export const LABEL_WEIGHT = 500;
+export const LABEL_PAD_X = 8;
+export const LABEL_PAD_Y = 4;
+
+/** Font of the frame label of a node with `font`. */
+export function labelFont(font: NodeFont): NodeFont {
+	return { ...font, px: Math.round(font.px * LABEL_SCALE), weight: LABEL_WEIGHT };
+}
+
+/** Size of a frame's label pill; `measure` measures at `labelFont(font)`. */
+export function labelSize(label: string, font: NodeFont, measure: (s: string) => number): Size {
+	const px = labelFont(font).px;
+	return { width: Math.ceil(measure(label)) + 2 * LABEL_PAD_X, height: px + 2 * LABEL_PAD_Y };
 }
 
 /** Font of the progress label of a node with `font` (for measuring it). */
@@ -283,9 +378,11 @@ export function estimateSize(
 	measure: (s: string) => number,
 	decor: { lead: number; tail: number } = { lead: 0, tail: 0 },
 ): Size {
-	const side = decor.lead + decor.tail;
+	// a quote's bars and gaps sit left of the text like a checkbox does
+	const lead = decor.lead + quoteInset(quoteBarLevels(text), font.px);
+	const side = lead + decor.tail;
 	const shown = isQuoteText(text) ? quoteShown(text) : text;
-	const r = wrapText(shown, textWrapWidth(maxWidth, font, decor), measure);
+	const r = wrapText(shown, textWrapWidth(maxWidth, font, { lead, tail: decor.tail }), measure);
 	return boxSize(r.width + side, r.lines * font.px * LINE_HEIGHT, font, maxWidth);
 }
 

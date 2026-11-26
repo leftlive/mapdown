@@ -30,3 +30,19 @@ export function splitPartners<L, R, P>(self: SplitLeaf<L, R, P>, all: readonly S
 export function splitAction(partners: readonly unknown[]): 'close' | 'open' {
 	return partners.length > 0 ? 'close' : 'open';
 }
+
+/**
+ * The form and note of a tab from its saved view state, for a deferred tab
+ * (Obsidian 1.7.2+: a background tab after a restart has a placeholder view
+ * until shown, but `getViewState()` already has its type and file).
+ * `mapType` is the map view's type; other view types are not split-sync tabs.
+ */
+export function splitFormOfState(
+	viewState: { type: string; state?: Record<string, unknown> },
+	mapType: string,
+): { kind: SplitKind; path: string | null } | null {
+	const kind: SplitKind | null = viewState.type === mapType ? 'map' : viewState.type === 'markdown' ? 'markdown' : null;
+	if (kind === null) return null;
+	const file = viewState.state?.file;
+	return { kind, path: typeof file === 'string' ? file : null };
+}

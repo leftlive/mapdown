@@ -25,6 +25,8 @@ export interface KeyTarget {
 	 * presentation (or ignored); false when not presenting.
 	 */
 	presentKey?(evt: KeyboardEvent): boolean;
+	/** `1`–`5` (spec 5.14): a priority in the open marker palette; does nothing when it is closed. */
+	markerDigit?(n: number): void;
 }
 
 type Action = string | ((t: KeyTarget) => void);
@@ -99,6 +101,12 @@ export const KEY_TABLE: readonly KeyBinding[] = [
 
 	// 3.3, new
 	...[1, 2, 3, 4, 5, 6].map((n): KeyBinding => ({ mods: ['Alt'], keys: [String(n)], action: `collapse-to-level-${n}` })),
+	// 1.4: node markers (spec 5.14)
+	{ mods: [], keys: ['M'], action: 'open-markers' },
+	...[1, 2, 3, 4, 5].map((n): KeyBinding => ({ mods: [], keys: [String(n)], action: (t) => t.markerDigit?.(n) })),
+	// 1.5: summaries and frames (spec 5.15)
+	{ mods: [], keys: ['S'], action: 'add-summary' },
+	{ mods: [], keys: ['B'], action: 'toggle-frame' },
 ];
 
 /** Page keys of presentation mode (spec 5.13, presenter remotes) that are no map keys otherwise. */

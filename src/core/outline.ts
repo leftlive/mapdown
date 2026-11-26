@@ -1,5 +1,6 @@
 // Markdown outline writer shared by the live map and the importers, so an
 // imported note is written exactly as the map would save it.
+import { notesSuffix } from './summary.ts';
 import type { MapNode } from './types.ts';
 
 export type LineEnding = '\n' | '\r\n';
@@ -9,6 +10,8 @@ export interface OutlineSource<T> {
 	text(node: T): string;
 	// Block id written as ` ^id` ('' for none).
 	blockId(node: T): string;
+	// Summary and frame comments written before the block id, with their leading space (contract 4.11.5); '' or absent for none.
+	notes?(node: T): string;
 	// Body lines [start, end) the node was written to.
 	written?(node: T, range: { start: number; end: number }): void;
 }
@@ -23,6 +26,16 @@ const TABLE_DELIMITER = /^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$/;
 export function hasMultilineFormula(text: string): boolean {
 	const spans = text.match(/\$\$[\s\S]*?\$\$/g);
 	return !!spans && spans.some((s) => s.includes('\n'));
+}
+
+/** A quote (contract 6.3): non-empty text whose every line starts with `>`. */
+export function isQuoteLines(text: string): boolean {
+	return text !== '' && text.split('\n').every((l) => l.startsWith('>'));
+}
+
+/** Text written as real lines in list items and paragraphs, not joined with `<br>`: a multi-line formula or a multi-line quote. */
+export function hasRealLines(text: string): boolean {
+	return hasMultilineFormula(text) || (text.includes('\n') && isQuoteLines(text));
 }
 
 /** Text of a multi-line formula as real lines: `pad` in front of every line after the first. */
@@ -85,9 +98,11 @@ export function writeOutline<T>(
 	forEachWithDepth(root, source, (n, depth) => {
 		const l = depth + 1;
 		const blockId = source.blockId(n);
-		const ending = blockId ? ` ^${blockId}` : '';
 		const text = source.text(n).trim();
 		const table = isTable(text);
+		// Code blocks and tables cannot carry summary or frame comments (4.11.1).
+		const notes = table || CODE_FENCE.test(text) ? '' : (source.notes?.(n) ?? '');
+		const ending = notes + (blockId ? ` ^${blockId}` : '');
 		const isHeading = depth < level;
 
 		const chunkStart = md.length;
@@ -103,11 +118,15 @@ export function writeOutline<T>(
 			}
 			blankBefore = true;
 		} else if (isHeading) {
-			md += '#'.repeat(l) + ' ' + text.replace(/\n/g, '<br>') + ending + eol;
+			// a heading's comments go on their own line under it, so links and the outline never see them (4.11.6)
+			const head = text.replace(/\n/g, '<br>');
+			md += '#'.repeat(l) + (head || !notes ? ' ' + head : '') + (blockId ? ` ^${blockId}` : '') + eol;
+			if (notes) md += notes.trim() + eol;
 		} else {
 			const space = '    '.repeat(depth - level);
-			// `- > quote` would swallow the next items as continuation lines.
-			const item = text.startsWith('>') ? `\\${text}` : text;
+			// A quote is written `- > text`; other text starting with `>` is escaped, else the first line would
+			// be read as a quote and swallow the lines after it (contract 6.3).
+			const item = text.startsWith('>') && !isQuoteLines(text) ? `\\${text}` : text;
 			if (!text) {
 				// An empty node keeps its block id (contract 4.8.3: ids are never dropped).
 				md += `${space}-${ending}${eol}`;
@@ -124,7 +143,7 @@ export function writeOutline<T>(
 			} else if (!text.includes('\n')) {
 				md += `${space}- ${item}${ending}${eol}`;
 			} else {
-				const multi = hasMultilineFormula(text);
+				const multi = hasRealLines(text);
 				md += `${space}- ${multi ? formulaLines(item, eol, space + '  ') : item.replace(/\n/g, '<br>')}${ending}${eol}`;
 			}
 		}
@@ -157,6 +176,7 @@ const MAP_SOURCE: OutlineSource<MapNode> = {
 	children: (node) => node.children,
 	text: (node) => node.text,
 	blockId: (node) => node.blockId ?? '',
+	notes: (node) => notesSuffix(node),
 };
 
 export function writeMapOutline(root: MapNode, headLevel: number, lineEnding: LineEnding): string {

@@ -13,7 +13,8 @@ import { t } from "../i18n.ts";
 import { DOM } from "./contract.ts";
 import type { MapView } from "./MapView.ts";
 import { keyboardInset, MOBILE_ACTIONS } from "./mobileActions.ts";
-import { addMultiButtons } from "./multiActionBar.ts";
+import { setIconFrom } from "./icons.ts";
+import { addMultiButtons, enableMultiButtons } from "./multiActionBar.ts";
 import { isMultiSelection } from "./multiActions.ts";
 
 /** Kept in both sets: the history buttons. */
@@ -39,7 +40,9 @@ export class MobileToolbar {
 			if (!COMMAND_BY_ID.has(a.command)) continue;
 			if (a.action === "undo" && this.multi.size === 0) this.multi = this.addMulti();
 			const b = this.el.createEl("button", { cls: "clickable-icon", attr: { [DOM.actionAttr]: a.action, "aria-label": t(a.label) } });
-			setIcon(b, a.icon);
+			setIconFrom(b, a.icon);
+			// older Obsidian versions have no "smile-plus" icon
+			if (a.icon === "smile-plus" && !b.querySelector("svg")) setIcon(b, "smile");
 			// keep the focus (and the soft keyboard) where it is
 			b.addEventListener("pointerdown", (e) => e.preventDefault(), { signal: this.abort.signal });
 			b.addEventListener("click", (e) => {
@@ -77,6 +80,7 @@ export class MobileToolbar {
 			b.disabled = !ok;
 			b.toggleClass("is-disabled", !ok);
 		}
+		if (multi) enableMultiButtons(this.multi, this.view);
 		this.trackKeyboard();
 	}
 
@@ -92,6 +96,7 @@ export class MobileToolbar {
 	private enabledFor(action: string): boolean {
 		if (action === "undo") return this.view.session.history.undoSize > 0;
 		if (action === "redo") return this.view.session.history.redoSize > 0;
+		if (action === "summary") return this.view.summaryFits();
 		return true;
 	}
 

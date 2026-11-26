@@ -1,9 +1,11 @@
 // Writes a map as an XMind Zen / 2020+ file: the reverse of the import rules
 // in ./read.ts. No Obsidian imports, so the unit tests can load it.
 import JSZip from 'jszip';
+import { presetOf, splitMarkers } from '../core/markers.ts';
+import { planSummaries } from '../core/summary.ts';
 import { taskOf } from '../core/tasks.ts';
-import type { LayoutDirection, MapNode, NodeKind } from '../core/types.ts';
-import { NOTE_PREFIX, TASK_DONE } from './read.ts';
+import type { FrameMark, LayoutDirection, MapNode, NodeKind, SummaryMark } from '../core/types.ts';
+import { NOTE_PREFIX, TASK_DONE, XMIND_MARKER_IDS } from './read.ts';
 
 const uuid = () => crypto.randomUUID();
 
@@ -14,6 +16,10 @@ export interface ExportNode {
     kind?: NodeKind;
     collapsed: boolean;
     children: ExportNode[];
+    /** 1.5 (spec 5.15): written to the parent's `summaries` when it covers siblings. */
+    summary?: SummaryMark;
+    /** 1.5: written to the parent's `boundaries`, the label as the title. */
+    frame?: FrameMark;
 }
 
 /**
@@ -22,12 +28,17 @@ export interface ExportNode {
  * opened temporarily by search still counts as folded; focus mode is not involved.
  */
 export function toExportTree(root: MapNode, collapsed: ReadonlySet<string>, rootName?: string): ExportNode {
-    const convert = (node: MapNode, isRoot: boolean): ExportNode => ({
-        text: isRoot && node.kind === 'root' && rootName !== undefined ? rootName : node.text,
-        kind: node.kind,
-        collapsed: !isRoot && collapsed.has(node.id),
-        children: node.children.map((c) => convert(c, false)),
-    });
+    const convert = (node: MapNode, isRoot: boolean): ExportNode => {
+        const out: ExportNode = {
+            text: isRoot && node.kind === 'root' && rootName !== undefined ? rootName : node.text,
+            kind: node.kind,
+            collapsed: !isRoot && collapsed.has(node.id),
+            children: node.children.map((c) => convert(c, false)),
+        };
+        if (!isRoot && node.summary) out.summary = node.summary;
+        if (!isRoot && node.frame) out.frame = node.frame;
+        return out;
+    };
     return convert(root, true);
 }
 
@@ -64,11 +75,32 @@ export function parseTitle(text: string, kind?: NodeKind): TitleParts {
         markers.push(task.done ? 'task-done' : 'task-start');
         title = title.slice(task.length).trimStart();
     }
+    const markable = !kind || kind === 'list' || kind === 'heading' || kind === 'paragraph';
     for (let changed = true; changed;) {
         changed = false;
+        // 1.4: leading emoji markers with an XMind id become markers; the rest stay in the title
+        const run = markable ? splitMarkers(title, 'paragraph') : null;
+        if (run && run.markers.length) {
+            const keep: string[] = [];
+            for (const { emoji } of run.markers) {
+                const preset = presetOf(emoji);
+                const id = preset?.group === 'priority' ? `priority-${preset.arg}` : preset ? XMIND_MARKER_IDS.get(preset.emoji) : undefined;
+                if (!id || markers.includes(id) || (id.startsWith('priority-') && markers.some((m) => m.startsWith('priority-')))) {
+                    keep.push(emoji);
+                    continue;
+                }
+                if (id.startsWith('priority-')) markers.unshift(id);
+                else markers.push(id);
+            }
+            if (keep.length < run.markers.length) {
+                title = keep.length ? `${keep.join(' ')} ${run.rest}`.trimEnd() : run.rest.trimStart();
+                changed = true;
+            }
+        }
         const priority = /^\(P([1-9])\)\s*/.exec(title);
-        if (priority && !markers.some((m) => m.startsWith('priority-'))) {
-            markers.unshift(`priority-${priority[1]}`);
+        if (priority) {
+            // a keycap earlier in the text already set the priority; this `(P1)` is dropped
+            if (!markers.some((m) => m.startsWith('priority-'))) markers.unshift(`priority-${priority[1]}`);
             title = title.slice(priority[0].length);
             changed = true;
         }
@@ -125,16 +157,19 @@ interface XmindTopic {
     notes?: { plain: { content: string } };
     branch?: 'folded';
     structureClass?: string;
-    children?: { attached: XmindTopic[] };
+    children?: { attached: XmindTopic[]; summary?: XmindTopic[] };
+    summaries?: { id: string; range: string; topicId: string }[];
+    boundaries?: { id: string; range: string; title?: string }[];
 }
 
 function toTopic(node: ExportNode): XmindTopic {
-    let children = node.children;
+    const children = node.children;
     let notes = '';
+    let skip = 0;
     const first = children[0];
     if (first && !first.children.length && first.text.startsWith(NOTE_PREFIX)) {
         notes = first.text.slice(NOTE_PREFIX.length).replace(/<br\s*\/?>/gi, '\n').trim();
-        children = children.slice(1);
+        skip = 1;
     }
     const parts = parseTitle(node.text, node.kind);
     const topic: XmindTopic = { id: uuid(), class: 'topic', title: parts.title };
@@ -150,12 +185,41 @@ function toTopic(node: ExportNode): XmindTopic {
     if (notes) {
         topic.notes = { plain: { content: notes } };
     }
-    if (node.collapsed && (children.length || notes)) {
+    if (node.collapsed && (children.length > skip || notes)) {
         topic.branch = 'folded';
     }
-    if (children.length) {
-        topic.children = { attached: children.map(toTopic) };
+    // 1.5: summaries that cover siblings become XMind summaries over the attached topics they cover
+    const plan = planSummaries(children.map((c) => c.summary));
+    const attached: XmindTopic[] = [];
+    const indexOf: number[] = [];
+    const summaryTopics: XmindTopic[] = [];
+    const summaries: NonNullable<XmindTopic['summaries']> = [];
+    const boundaries: NonNullable<XmindTopic['boundaries']> = [];
+    children.forEach((c, i) => {
+        if (i < skip) return;
+        const cover = plan.covers[i];
+        const t = toTopic(c);
+        // the note child (a summary may cover it) is no topic: the range starts at the first topic
+        const from = cover ? indexOf.slice(cover.first, cover.last + 1).find((x) => x !== undefined) : undefined;
+        if (cover && from !== undefined) {
+            summaryTopics.push(t);
+            summaries.push({ id: uuid(), range: `(${from},${indexOf[cover.last] ?? from})`, topicId: t.id });
+            return;
+        }
+        indexOf[i] = attached.length;
+        if (c.frame) {
+            const b: NonNullable<XmindTopic['boundaries']>[number] = { id: uuid(), range: `(${attached.length},${attached.length})` };
+            if (c.frame.label) b.title = c.frame.label;
+            boundaries.push(b);
+        }
+        attached.push(t);
+    });
+    if (attached.length) {
+        topic.children = { attached };
+        if (summaryTopics.length) topic.children.summary = summaryTopics;
     }
+    if (summaries.length) topic.summaries = summaries;
+    if (boundaries.length) topic.boundaries = boundaries;
     return topic;
 }
 

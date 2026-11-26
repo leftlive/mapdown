@@ -57,6 +57,33 @@ export interface NodeSource {
 	/** 1–6 for headings. */
 	headingLevel?: number;
 	list?: ListStyle;
+	/**
+	 * Summary and frame comments on the node's last line (format contract
+	 * 4.11): the span of each `%%…%%`, without the space before it. Absent when
+	 * the node has none.
+	 */
+	notes?: NotesSource;
+}
+
+/** A summary comment (contract 4.11): `count` from `%%summary:N%%`, absent for the default range. */
+export interface SummaryMark {
+	count?: number;
+}
+
+/** A frame comment: `label` from `%%frame: label%%`, absent when there is none. */
+export interface FrameMark {
+	label?: string;
+}
+
+/** Where a node's comments sit in the text (document offsets, `%%` to `%%`). */
+export interface NotesSource {
+	summary?: Range;
+	frame?: Range;
+	/**
+	 * A heading's own comment line (contract 4.11.6): the line right under the heading holding only these
+	 * comments, from its start to its end (line break not included). It is part of the heading's `range`.
+	 */
+	line?: Range;
 }
 
 export interface MapNode {
@@ -71,6 +98,10 @@ export interface MapNode {
 	blockId: string | null;
 	children: MapNode[];
 	source: NodeSource | null;
+	/** Present when the node is written as a summary (`%%summary%%`, spec 5.15); whether it holds depends on its siblings. */
+	summary?: SummaryMark;
+	/** Present when the node has a frame (`%%frame%%`). */
+	frame?: FrameMark;
 }
 
 /** `mindmark-state` as read from the frontmatter. */

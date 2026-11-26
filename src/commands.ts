@@ -4,6 +4,7 @@
 // kebab-case. None has a default hotkey.
 
 import {
+	addSummary,
 	adoptSiblings,
 	childPosition,
 	deleteNodes,
@@ -11,9 +12,16 @@ import {
 	moveDown,
 	moveNodes,
 	moveUp,
+	setMarks,
+	setQuote,
 	setText,
 	siblingPosition,
+	summaryRefusal,
+	type MarkChange,
 } from './core/ops.ts';
+import { canHaveNotes, cleanLabel } from './core/summary.ts';
+import { planQuote } from './core/quote.ts';
+import { MARKER_PRESETS, applyMarker, canHaveMarkers, markerOp, type MarkerOp } from './core/markers.ts';
 import { selectAllVisible, topmostSelected } from './core/state.ts';
 import { makeTaskKind } from './core/tasks.ts';
 import type { MapNode } from './core/types.ts';
@@ -27,7 +35,7 @@ import {
 	sidesOf,
 	makeTasksSteps,
 	toggleTaskSteps,
-	toggleWrap,
+	toggleWrapNode,
 } from './controller/actions.ts';
 import { collapseAllTarget, collapseToggleTarget } from './controller/selectionOps.ts';
 import { indexNodes, keepSelection, type StepFn } from './controller/session.ts';
@@ -156,14 +164,14 @@ function format(v: MapView, marker: string): void {
 	}
 	const nodes = v.selectedInOrder();
 	if (nodes.length === 0) return;
-	v.runSteps(textSteps(nodes, (t) => toggleWrap(t, marker)), { select: keepSelection(v.session) });
+	v.runSteps(textSteps(nodes, (t, kind) => toggleWrapNode(t, kind, marker)), { select: keepSelection(v.session) });
 }
 
-function textSteps(nodes: readonly MapNode[], change: (text: string) => string): StepFn[] {
+function textSteps(nodes: readonly MapNode[], change: (text: string, kind: MapNode['kind']) => string): StepFn[] {
 	return nodes.map((n) => (d, id) => {
 		const cur = indexNodes(d.root).get(id(n.id))?.node;
 		if (!cur) return null;
-		const value = change(cur.text);
+		const value = change(cur.text, cur.kind);
 		const result = setText(d, cur.id, value);
 		return result ? { result, keep: [cur.id] } : null;
 	});
@@ -205,6 +213,146 @@ function makeTasksIn(v: MapView, nodes: readonly MapNode[]): void {
 	v.runSteps(plan.steps, { reveal: false, select: keepSelection(v.session) });
 	const n = plan.skipped();
 	if (n > 0) v.notify(n === 1 ? 'tasks-skipped-one' : 'tasks-skipped', n);
+}
+
+/**
+ * A marker clicked in the palette, "Clear markers" (`marker` null) or "Set
+ * priority n" on every selected node (spec 5.14), as one undo step. When every
+ * node that can have markers has `marker` already it is removed from all of
+ * them, else added where it is missing; nodes that cannot have markers are
+ * skipped and counted in a notice, and so is a paragraph whose text would
+ * become empty. Only nodes whose text changes are written.
+ */
+export function applyMarkers(v: MapView, marker: string | null): void {
+	if (v.isEditing()) v.commitEdit();
+	const nodes = v.selectedInOrder();
+	if (nodes.length === 0) return;
+	const ok = nodes.filter((n) => canHaveMarkers(n, v.session.doc.root));
+	let skipped = nodes.length - ok.length;
+	if (ok.length > 0) {
+		const op: MarkerOp = marker === null ? { clear: true } : markerOp(ok, marker);
+		const changed = ok.filter((n) => {
+			const value = applyMarker(n.text, n.kind, op);
+			if (value === n.text) return false;
+			// A paragraph left empty would turn into an empty list item (more than the run changes), and a
+			// node the text cannot express would cancel the whole step: both are skipped like other nodes.
+			if ((n.kind === 'paragraph' && value === '') || !setText(v.session.doc, n.id, value)) {
+				skipped++;
+				return false;
+			}
+			return true;
+		});
+		const steps = changed.map((n): StepFn => (d, id) => {
+			const cur = indexNodes(d.root).get(id(n.id))?.node;
+			if (!cur) return null;
+			const result = setText(d, cur.id, applyMarker(cur.text, cur.kind, op));
+			return result ? { result, keep: [cur.id] } : null;
+		});
+		if (steps.length > 0) v.runSteps(steps, { reveal: false, select: keepSelection(v.session) });
+	}
+	if (skipped > 0) v.notify(skipped === 1 ? 'markers-skipped-one' : 'markers-skipped', skipped);
+}
+
+/**
+ * "Toggle quote" on every selected node (spec 5.6), one undo step: when every
+ * node that can be a quote is one, a level comes off each; otherwise a level
+ * goes on the nodes that are none yet. Headings, tasks, callouts, code,
+ * tables and the root are skipped and counted in a notice (the only output
+ * when nothing can change).
+ */
+export function toggleQuote(v: MapView): void {
+	if (v.isEditing()) v.commitEdit();
+	const nodes = v.selectedInOrder();
+	if (nodes.length === 0) return;
+	const plan = planQuote(nodes, v.session.doc.root);
+	let skipped = plan.skipped;
+	// a node whose lines cannot be found would cancel the whole step: skipped like the others
+	const targets = plan.targets.filter((n) => {
+		if (setQuote(v.session.doc, n.id, plan.remove)) return true;
+		skipped++;
+		return false;
+	});
+	if (targets.length > 0) {
+		const steps = targets.map((n): StepFn => (d, id) => {
+			const cur = indexNodes(d.root).get(id(n.id))?.node;
+			const result = cur ? setQuote(d, cur.id, plan.remove) : null;
+			return cur && result ? { result, keep: [cur.id] } : null;
+		});
+		v.runSteps(steps, { reveal: false, select: keepSelection(v.session) });
+	}
+	if (skipped > 0) v.notify(skipped === 1 ? 'quote-skipped-one' : 'quote-skipped', skipped);
+}
+
+/**
+ * "Add summary" (spec 5.15): a new empty summary after the last selected
+ * node, covering the selection, then editing it; one undo step. A selection
+ * that is not adjacent siblings, or that a summary already covers, gets a
+ * notice and changes nothing.
+ */
+export function addSummaryCommand(v: MapView): void {
+	if (v.isEditing()) v.commitEdit();
+	const ids = v.selectedInOrder().map((n) => n.id);
+	if (ids.length === 0) return;
+	const direction = v.direction();
+	const why = summaryRefusal(v.session.doc, ids, direction);
+	if (why) {
+		v.notify(why === 'covered' ? 'summary-covered' : 'summary-not-siblings');
+		return;
+	}
+	if (v.runSteps(step((d, idOf) => {
+		const r = addSummary(d, ids.map(idOf), { direction, headLevel: v.headLevel() });
+		return r ? { result: r.result } : null;
+	}))) v.startEditPrimary('end');
+}
+
+/** Summary and frame comment changes as one undo step that keeps the selection; true when something changed. */
+function runMarks(v: MapView, changes: readonly MarkChange[]): boolean {
+	if (changes.length === 0 || !setMarks(v.session.doc, changes).result) return false;
+	return v.runSteps(step((d, idOf) => {
+		const r = setMarks(d, changes.map((c) => ({ ...c, id: idOf(c.id) })));
+		return r.result ? { result: r.result, keep: r.changed } : null;
+	}), { reveal: false, select: keepSelection(v.session) });
+}
+
+/** "Remove summary" (spec 5.15): the selected summaries become ordinary nodes; text and children stay. */
+export function removeSummaries(v: MapView): void {
+	if (v.isEditing()) v.commitEdit();
+	runMarks(v, v.selectedInOrder().filter((n) => n.summary).map((n) => ({ id: n.id, summary: null })));
+}
+
+/**
+ * "Toggle boundary" (spec 5.15): when every selected node that can have a
+ * frame has one, all come off; otherwise the nodes without one get one (no
+ * label). Nodes that cannot have one are skipped and counted in a notice.
+ */
+export function toggleFrames(v: MapView): void {
+	if (v.isEditing()) v.commitEdit();
+	const nodes = v.selectedInOrder();
+	if (nodes.length === 0) return;
+	const root = v.session.doc.root;
+	const ok = nodes.filter((n) => canHaveNotes(n, root));
+	const skipped = nodes.length - ok.length;
+	const remove = ok.length > 0 && ok.every((n) => n.frame);
+	runMarks(v, remove ? ok.map((n) => ({ id: n.id, frame: null })) : ok.filter((n) => !n.frame).map((n) => ({ id: n.id, frame: {} })));
+	if (skipped > 0) v.notify(skipped === 1 ? 'frames-skipped-one' : 'frames-skipped', skipped);
+}
+
+/**
+ * "Boundary label…" (spec 5.15): a prompt prefilled with the label of the
+ * selected framed nodes (empty when they differ); the answer, `%` removed,
+ * becomes their label, empty removes it. One undo step.
+ */
+export function editFrameLabel(v: MapView): void {
+	if (v.isEditing()) v.commitEdit();
+	const framed = v.selectedInOrder().filter((n) => n.frame);
+	if (framed.length === 0) return;
+	const labels = new Set(framed.map((n) => n.frame?.label ?? ''));
+	const initial = labels.size === 1 ? ([...labels][0] ?? '') : '';
+	const ids = framed.map((n) => n.id);
+	v.promptFrameLabel(initial, (value) => {
+		const label = cleanLabel(value);
+		runMarks(v, ids.map((id) => ({ id, frame: label ? { label } : {} })));
+	});
 }
 
 /** Every selected node with children follows the primary (one undo step). */
@@ -314,6 +462,25 @@ export const COMMANDS: MapCommand[] = [
 	},
 	{ id: 'Toggle expand/collapse node', name: 'Toggle expand/collapse node', need: 'selection', palette: true, run: toggleCollapse },
 	{ id: 'toggle-task', name: 'toggle-task', need: 'selection', palette: true, run: toggleTasks },
+	{ id: 'toggle-quote', name: 'toggle-quote', need: 'selection', palette: true, run: toggleQuote },
+	// node markers (spec 5.14)
+	{ id: 'open-markers', name: 'open-markers', need: 'selection', palette: true, run: (v) => v.openMarkers({ node: true }) },
+	{ id: 'clear-markers', name: 'clear-markers', need: 'selection', palette: true, run: (v) => applyMarkers(v, null) },
+	// summaries and frames (spec 5.15)
+	{ id: 'add-summary', name: 'add-summary', need: 'selection', palette: true, run: addSummaryCommand },
+	{ id: 'remove-summary', name: 'remove-summary', need: 'selection', palette: true, run: removeSummaries },
+	{ id: 'toggle-frame', name: 'toggle-frame', need: 'selection', palette: true, run: toggleFrames },
+	{ id: 'edit-frame-label', name: 'edit-frame-label', need: 'selection', palette: true, run: editFrameLabel },
+	...[1, 2, 3, 4, 5].map(
+		(n): MapCommand => ({
+			id: `set-priority-${n}`,
+			name: 'set-priority',
+			nameArg: n,
+			need: 'selection',
+			palette: true,
+			run: (v) => applyMarkers(v, MARKER_PRESETS[n - 1]?.emoji ?? null),
+		}),
+	),
 	{ id: 'Move the current node above', name: 'Move the current node above', need: 'selection', palette: true, run: (v) => moveBy(v, moveOpFor('up', 'root', v.direction())) },
 	{ id: 'Move the current node below', name: 'Move the current node below', need: 'selection', palette: true, run: (v) => moveBy(v, moveOpFor('down', 'root', v.direction())) },
 	{ id: 'Move the current node left', name: 'Move the current node left', need: 'selection', palette: true, run: (v) => moveSide(v, 'left') },

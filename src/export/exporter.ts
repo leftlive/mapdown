@@ -18,12 +18,35 @@ import type { LayoutResult } from '../core/layout.ts';
 import { indexNodes } from '../controller/session.ts';
 import { folderOf } from '../controller/fileNames.ts';
 import { isChinese, t } from '../i18n.ts';
+import { detachedEl } from '../view/domSafe.ts';
 import type { DoneExtras, ExportExt } from './location.ts';
 import { buildPdf } from './pdf.ts';
 import { chooseTarget, discardTarget, explainFallback, progressNotice, showDone, writeTarget, type Saved, type Target } from './save.ts';
-import { taskOf, taskProgress } from '../core/tasks.ts';
-import type { Size } from '../core/types.ts';
-import { LINE_HEIGHT, NODE_BORDER, NODE_LEVELS, PROGRESS_SCALE, TASK_BOX_EM, boxSize, decorWidths, extraW, fontFor, progressFont, textWrapWidth } from '../view/measure.ts';
+import { exportXmind } from '../xmind/entries.ts';
+import { splitMarkers } from '../core/markers.ts';
+import { taskOf, taskProgress, type TaskMark } from '../core/tasks.ts';
+import type { NodeKind, Size } from '../core/types.ts';
+import {
+	LINE_HEIGHT,
+	NODE_BORDER,
+	NODE_LEVELS,
+	PROGRESS_SCALE,
+	TASK_BOX_EM,
+	TASK_GAP_EM,
+	boxSize,
+	decorWidths,
+	extraW,
+	fontFor,
+	labelFont,
+	markerFont,
+	markerRun,
+	progressFont,
+	quoteBarLevels,
+	quoteInset,
+	textWrapWidth,
+	type NodeDecor,
+	type NodeFont,
+} from '../view/measure.ts';
 import type { MapView } from '../view/MapView.ts';
 import {
 	buildSvg,
@@ -125,9 +148,8 @@ export function showExportMenu(view: MapView): void {
 	add(t('export-menu-pdf'), 'file-text', () => void view.exportImage('pdf', 4));
 	add(t('export-menu-html'), 'file-code', () => void view.exportImage('html', 1));
 	add(t('export-menu-xmind'), 'file-output', () => {
-		// registered by the XMind export with addCommand; it saves first itself
-		view.app.workspace.setActiveLeaf(view.leaf, { focus: true });
-		(view.app as unknown as { commands: { executeCommandById(id: string): boolean } }).commands.executeCommandById('mapdown:export-xmind');
+		// the same export as the `export-xmind` command; it saves first itself
+		void exportXmind(view);
 	});
 	// spec 2.3 "白板导出": after XMind
 	add(t('export-menu-canvas'), 'layout-dashboard', () => void view.exportCanvas());
@@ -139,6 +161,36 @@ export function showExportMenu(view: MapView): void {
 /** Stops the pipeline once the view closed (its element leaves the document on detach). */
 function check(ctx: Pick<Context, 'view' | 'signal'>): void {
 	if (ctx.signal.aborted || !ctx.view.contentEl.isConnected) throw new Cancelled();
+}
+
+/**
+ * A node's task, markers and own text as the export draws them (spec 5.9, 5.14): the checkbox and the
+ * markers apart from the text. Without `tasks` (HTML) a task's text stays as it is, markers included.
+ */
+function nodeParts(text: string, kind: NodeKind, tasks: boolean, isRoot = false): { task: TaskMark | null; markers: string[]; own: string } {
+	const task = taskOf(text, kind);
+	if (task && !tasks) return { task: null, markers: [], own: text };
+	// the root has no markers (spec 5.14): hand-typed emoji stay text
+	const split = splitMarkers(text, isRoot ? 'root' : kind);
+	return { task, markers: split.markers.map((m) => m.emoji), own: split.rest };
+}
+
+/** The decor of a node (checkbox, markers, progress label) and the widths it takes beside the text, measured like the screen. */
+function nodeSide(
+	parts: { task: TaskMark | null; markers: string[]; own: string },
+	label: string | null,
+	font: NodeFont,
+	measure: (s: string, px: number, weight: number) => number,
+): { decor: NodeDecor | null; side: { lead: number; tail: number }; markerAt: (s: string) => number } {
+	const { task, markers, own } = parts;
+	const decor: NodeDecor | null =
+		task || label || markers.length > 0
+			? { task: task !== null, progress: label, ...(markers.length > 0 ? { markers, markersOnly: own === '' } : {}) }
+			: null;
+	const lf = progressFont(font);
+	const mf = markerFont(font);
+	const markerAt = (s: string): number => measure(s, mf.px, mf.weight);
+	return { decor, side: decorWidths(decor, font, (s) => measure(s, lf.px, lf.weight), markerAt), markerAt };
 }
 
 async function runExport(ctx: Context, lay: LayoutResult, format: ExportFormat, scale: number, target: Target): Promise<{ saved: Saved; extras: DoneExtras }> {
@@ -161,11 +213,12 @@ async function runExport(ctx: Context, lay: LayoutResult, format: ExportFormat, 
 		if (!entry) continue;
 		const isVirtualRoot = entry.node === ctx.view.session.doc.root && ctx.view.session.doc.virtualRoot;
 		const text = isVirtualRoot ? ctx.view.session.rootName : entry.node.text;
-		const task = tasks ? taskOf(text, entry.node.kind) : null;
-		const own = task ? text.slice(task.length) : text;
+		const { task, own } = nodeParts(text, entry.node.kind, tasks, entry.node === ctx.view.session.doc.root);
 		// PNG, JPEG and SVG draw map embeds as cards (spec 5.10); HTML keeps the text as before
 		const parsed = parseBlocks(entry.node.kind === 'code' ? own : markCards(own, cards), entry.node.kind);
-		const blocks = task?.done ? markTaskDone(parsed) : parsed;
+		const done = task?.done ? markTaskDone(parsed) : parsed;
+		// a quote shows in the theme's quote style, italic or not (spec 5.6)
+		const blocks = theme.quote?.italic && quoteBarLevels(own) > 0 ? italicBlocks(done) : done;
 		blocksOf.set(id, blocks);
 		for (const b of blocks) if (b.type === 'image') imageBlocks.push(b);
 	}
@@ -186,11 +239,16 @@ async function runExport(ctx: Context, lay: LayoutResult, format: ExportFormat, 
 		font: ReturnType<typeof fontFor>;
 		side: { lead: number; tail: number };
 		task: ReturnType<typeof taskOf>;
+		/** Markers and their x in the content box (spec 5.14). */
+		markers: { text: string; x: number }[];
 		count: { done: number; total: number } | undefined;
 		label: string | null;
 		lineHeight: number;
 		input: ContentInput;
 		content: ReturnType<typeof layoutContent>;
+		/** Bars of a quote (spec 5.6) and the room they and their gaps take. */
+		quoteLevels: number;
+		inset: number;
 	}
 	const prepared: Prepared[] = [];
 	// nodes drawn differently from the screen (formulas as source) get the size of what is drawn
@@ -202,11 +260,19 @@ async function runExport(ctx: Context, lay: LayoutResult, format: ExportFormat, 
 		const blocks = blocksOf.get(id);
 		if (!entry || !blocks) continue;
 		const font = fontFor(entry.depth, settings.fontSize);
-		const task = tasks ? taskOf(entry.node.text, entry.node.kind) : null;
+		const isVirtualRoot = entry.node === ctx.view.session.doc.root && ctx.view.session.doc.virtualRoot;
+		const parts = nodeParts(isVirtualRoot ? ctx.view.session.rootName : entry.node.text, entry.node.kind, tasks, entry.node === ctx.view.session.doc.root);
+		const task = parts.task;
 		const count = counts?.get(id);
 		const label = count ? `${count.done}/${count.total}` : null;
-		const lf = progressFont(font);
-		const side = decorWidths(task || label ? { task: task !== null, progress: label } : null, font, (s) => measurer.text(s, {}, lf.px, lf.weight));
+		const { side: base, markerAt } = nodeSide(parts, label, font, (s, px, weight) => measurer.text(s, {}, px, weight));
+		// a quote's bars and gaps take room left of its text, like a checkbox (spec 5.6)
+		const quoteLevels = theme.quote && entry.node.kind !== 'code' && entry.node.kind !== 'table' ? quoteBarLevels(parts.own) : 0;
+		const inset = quoteLevels > 0 ? quoteInset(quoteLevels, font.px, theme.quote?.thickness) : 0;
+		const side = { lead: base.lead + inset, tail: base.tail };
+		const run = markerRun(parts.markers, font, markerAt, parts.own === '');
+		const markerLead = task ? (TASK_BOX_EM + TASK_GAP_EM) * font.px : 0;
+		const markers = parts.markers.map((m, i) => ({ text: m, x: markerLead + (run.xs[i] ?? 0) }));
 		const lineHeight = font.px * LINE_HEIGHT;
 		const wrapWidth = Math.max(1, textWrapWidth(maxWidth, font, side));
 		const input: ContentInput = {
@@ -231,15 +297,18 @@ async function runExport(ctx: Context, lay: LayoutResult, format: ExportFormat, 
 		}
 		missing += content.missingImages;
 		formulas += content.formulas;
-		prepared.push({ id, font, side, task, count, label, lineHeight, input, content });
+		prepared.push({ id, font, side, task, markers, count, label, lineHeight, input, content, quoteLevels, inset });
 	}
 	const childrenOf = (id: string): string[] => index.get(id)?.node.children.map((c) => c.id) ?? [];
 	const drawn = params ? exportLayout(lay, childrenOf, sizes, params.direction, params.palette) : lay;
 
 	const rootId = drawn.nodes.keys().next().value as string;
-	const colors = new Map(drawn.edges.map((e) => [e.childId, e.color]));
+	// a summary and its subtree are drawn in the neutral colour (spec 5.15)
+	const muted = theme.muted ?? theme.faint;
+	const colors = new Map(drawn.edges.map((e) => [e.childId, e.muted ? muted : e.color]));
+	for (const b of drawn.braces) colors.set(b.summaryId, muted);
 	const nodes: SceneNode[] = [];
-	for (const { id, font, side, task, count, label, lineHeight, content } of prepared) {
+	for (const { id, font, side, task, markers, count, label, lineHeight, content, quoteLevels, inset } of prepared) {
 		const entry = index.get(id);
 		const p = drawn.nodes.get(id);
 		if (!entry || !p) continue;
@@ -257,10 +326,17 @@ async function runExport(ctx: Context, lay: LayoutResult, format: ExportFormat, 
 			padY: font.padY,
 			radius: font.radius,
 			task: task ? { done: task.done, size: font.px * TASK_BOX_EM, lead: side.lead, cy: lineHeight / 2 } : null,
+			lead: side.lead,
+			quote: quoteLevels > 0 ? { levels: quoteLevels, inset, height: content.height, width: content.width } : null,
+			markers: markers.length > 0 ? { fontPx: markerFont(font).px, cy: lineHeight / 2, items: markers } : null,
 			progress: count && label ? { label, complete: count.done === count.total, fontPx: font.px * PROGRESS_SCALE, cy: lineHeight / 2 } : null,
 		});
 	}
-	const scene: Scene = { box: exportBox(drawn.bounds), nodes, edges: drawn.edges, rootId, theme, branchStyle: settings.branchStyle };
+	const frames = drawn.frames.map((box) => {
+		const entry = index.get(box.id);
+		return { box, label: entry?.node.frame?.label ?? '', fontPx: labelFont(fontFor(entry?.depth ?? 1, settings.fontSize)).px };
+	});
+	const scene: Scene = { box: exportBox(drawn.bounds), nodes, edges: drawn.edges, rootId, theme, branchStyle: settings.branchStyle, braces: drawn.braces, frames };
 	const folder = folderOf(ctx.file.path);
 	const taken = (path: string): boolean => ctx.app.vault.getAbstractFileByPath(path) !== null;
 
@@ -292,11 +368,11 @@ async function runExport(ctx: Context, lay: LayoutResult, format: ExportFormat, 
 async function rasterize(ctx: Context, svg: string, scene: Scene, scale: number, format: 'png' | 'jpeg', background: string): Promise<ArrayBuffer> {
 	const size = imageSize(scene.box, scale);
 	// a data URL, not a blob URL: Chromium keeps the canvas exportable then
-	const img = ctx.doc.createElement('img');
+	const img = detachedEl(ctx.doc, 'img');
 	img.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
 	await img.decode();
 	check(ctx);
-	const canvas = ctx.doc.createElement('canvas');
+	const canvas = detachedEl(ctx.doc, 'canvas');
 	canvas.width = size.width;
 	canvas.height = size.height;
 	try {
@@ -374,10 +450,30 @@ function readTheme(ctx: Context): ExportTheme {
 			taskDone: v('--checklist-done-color', v('--text-muted', '#888888')),
 			muted: v('--text-muted', '#888888'),
 			success: v('--text-success', v('--color-green', '#08b94e')),
+			quote: {
+				thickness: px('--blockquote-border-thickness', 2),
+				border: v('--blockquote-border-color', v('--interactive-accent', '#7b6cd9')),
+				color: v('--blockquote-color', textNormal),
+				italic: /italic|oblique/.test(cs.getPropertyValue('--blockquote-font-style')),
+				background: quoteBackground(cs.getPropertyValue('--blockquote-background-color'), concrete),
+			},
 		};
 	} finally {
 		probe.remove();
 	}
+}
+
+/** The quote background as a colour, or null when the theme has none (empty, `transparent` or fully transparent). */
+function quoteBackground(raw: string, concrete: (value: string, fallback: string) => string): string | null {
+	const value = raw.trim();
+	if (value === '' || value === 'transparent' || value === 'none') return null;
+	const c = concrete(value, '');
+	return c === '' || /^rgba\(.*,\s*0\)$/.test(c) ? null : c;
+}
+
+/** The blocks with every text run in italics. */
+function italicBlocks(blocks: Block[]): Block[] {
+	return blocks.map((b) => (b.type === 'text' ? { ...b, runs: b.runs.map((r) => ({ ...r, style: { ...r.style, italic: true } })) } : b));
 }
 
 /** Fonts are measured this large for their ascent and descent: canvas rounds them to whole pixels. */
@@ -389,7 +485,7 @@ function createMeasurer(doc: Document, theme: ExportTheme): {
 	/** Ascent and descent of the family's first available font, per em; undefined when the canvas cannot tell. */
 	em(family: string): FontEm | undefined;
 } {
-	const c2d = doc.createElement('canvas').getContext('2d');
+	const c2d = detachedEl(doc, 'canvas').getContext('2d');
 	let current = '';
 	const width = (font: string, s: string): number => {
 		if (!c2d) return s.length * 0.6 * (parseFloat(font.split('px')[0].split(' ').pop() ?? '16') || 16);
@@ -466,7 +562,7 @@ async function loadImage(ctx: Context, b: Extract<Block, { type: 'image' }>): Pr
 }
 
 async function decodeSize(ctx: Context, href: string): Promise<ResolvedImage | null> {
-	const img = ctx.doc.createElement('img');
+	const img = detachedEl(ctx.doc, 'img');
 	img.src = href;
 	try {
 		await img.decode();
@@ -529,10 +625,11 @@ export async function canvasNodeSizes(view: MapView, file: TFile, signal: AbortS
 		if (!entry) continue;
 		const isVirtualRoot = entry.node === root && view.session.doc.virtualRoot;
 		const text = isVirtualRoot ? view.session.rootName : entry.node.text;
-		const task = taskOf(text, entry.node.kind);
-		const own = task ? text.slice(task.length) : text;
+		const parts = nodeParts(text, entry.node.kind, true, entry.node === root);
+		const { task, own } = parts;
 		const parsed = parseBlocks(entry.node.kind === 'code' ? own : markCards(own, cards), entry.node.kind);
-		const blocks = task?.done ? markTaskDone(parsed) : parsed;
+		const done = task?.done ? markTaskDone(parsed) : parsed;
+		const blocks = theme.quote?.italic && quoteBarLevels(own) > 0 ? italicBlocks(done) : done;
 		for (const b of blocks) {
 			if (b.type !== 'image') continue;
 			const key = imageKey(b);
@@ -543,8 +640,9 @@ export async function canvasNodeSizes(view: MapView, file: TFile, signal: AbortS
 		const font = fontFor(entry.depth, settings.fontSize);
 		const count = counts?.get(id);
 		const label = count ? `${count.done}/${count.total}` : null;
-		const lf = progressFont(font);
-		const side = decorWidths(task || label ? { task: task !== null, progress: label } : null, font, (s) => measurer.text(s, {}, lf.px, lf.weight));
+		const { side: base } = nodeSide(parts, label, font, (s, px, weight) => measurer.text(s, {}, px, weight));
+		const levels = entry.node.kind !== 'code' && entry.node.kind !== 'table' ? quoteBarLevels(own) : 0;
+		const side = { lead: base.lead + quoteInset(levels, font.px, theme.quote?.thickness), tail: base.tail };
 		const wrapWidth = Math.max(1, textWrapWidth(maxWidth, font, side));
 		const natural = layoutContent({
 			blocks,

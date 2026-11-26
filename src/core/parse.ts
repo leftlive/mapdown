@@ -1,7 +1,9 @@
 // Markdown text -> node tree, per docs/Markdown格式契约.md sections 2-4.
 // A single line-based pass; every node records where it lives in the text.
 
+import { notableText, readNotes } from './summary.ts';
 import type {
+	FrameMark,
 	Frontmatter,
 	LayoutDirection,
 	ListStyle,
@@ -9,8 +11,10 @@ import type {
 	MindmarkState,
 	NodeKind,
 	NodeSource,
+	NotesSource,
 	ParsedDoc,
 	Range,
+	SummaryMark,
 } from './types.ts';
 
 interface Line {
@@ -127,7 +131,7 @@ function cellCount(row: string): number {
 const FM_FENCE = /^---[ \t]*$/;
 const FM_KEY = /^(["']?)([^\s"':#][^"':]*?)\1[ \t]*:(?:[ \t]+(.*))?$/;
 
-function parseFrontmatter(text: string): Frontmatter | null {
+export function parseFrontmatter(text: string): Frontmatter | null {
 	const start = text.charCodeAt(0) === 0xfeff ? 1 : 0;
 	const lines = splitLines(text, start);
 	if (lines.length === 0 || !FM_FENCE.test(lines[0]?.text ?? '')) return null;
@@ -326,6 +330,63 @@ interface Built {
 	textRange: Range | null;
 	headingLevel?: number;
 	list?: ListStyle;
+	notes?: Notes;
+}
+
+/** Summary and frame comments found on a node's last line (document offsets). */
+interface Notes {
+	source: NotesSource;
+	summary?: SummaryMark;
+	frame?: FrameMark;
+}
+
+/**
+ * Cut summary and frame comments (contract 4.11) off the end of `span` in
+ * `line` (a line starting at document offset `lineFrom`). `span.to` moves to
+ * the end of the text before them. Returns null and leaves `span` alone when
+ * there are none.
+ */
+function cutNotes(line: string, lineFrom: number, span: { from: number; to: number }, bare: boolean): Notes | null {
+	const r = readNotes(line, span.from, span.to, bare);
+	if (!r) return null;
+	span.to = r.to;
+	const notes: Notes = { source: {} };
+	if (r.summary) {
+		notes.summary = r.summary.mark;
+		notes.source.summary = { from: lineFrom + r.summary.from, to: lineFrom + r.summary.to };
+	}
+	if (r.frame) {
+		notes.frame = r.frame.mark;
+		notes.source.frame = { from: lineFrom + r.frame.from, to: lineFrom + r.frame.to };
+	}
+	return notes;
+}
+
+/**
+ * A heading's own comment line (contract 4.11.6): `line` holds nothing but
+ * summary and frame comments (spaces between and around them allowed). Null
+ * otherwise.
+ */
+function ownNotes(line: Line): Notes | null {
+	const t = line.text;
+	const from = leadLength(t);
+	let to = t.length;
+	while (to > from && (t[to - 1] === ' ' || t[to - 1] === '\t')) to--;
+	if (from === to) return null;
+	const span = { from, to };
+	const notes = cutNotes(t, line.from, span, true);
+	if (!notes || span.to !== from) return null;
+	notes.source.line = { from: line.from, to: line.to };
+	return notes;
+}
+
+/** The text of a heading line after its hashes; with `notes`, summary and frame comments are cut off first. */
+function headingText(line: string, lineFrom: number, contentStart: number, withNotes: boolean): { span: Span; notes: Notes | null } {
+	const span = spanOf(line, contentStart, line.length, true);
+	const notes = withNotes ? cutNotes(line, lineFrom, span, true) : null;
+	const hashes = CLOSING_HASHES.exec(line.slice(span.from, span.to));
+	if (hashes) span.to = span.from + hashes.index;
+	return { span, notes };
 }
 
 type ContinueMode = 'para' | 'item' | 'quote';
@@ -337,9 +398,14 @@ class BodyParser {
 	readonly root: MapNode;
 	private readonly headings: { level: number; node: MapNode }[] = [];
 	private list: { col: number; node: MapNode }[] = [];
+	/** A line never read as a heading's comment line (the document root's, contract 4.11.1). */
+	private readonly skipLine: number;
+	/** Index of the comment line the first top-level heading took, else -1. */
+	firstHeadingNotesLine = -1;
 
-	constructor(lines: Line[]) {
+	constructor(lines: Line[], skipLine = -1) {
 		this.lines = lines;
+		this.skipLine = skipLine;
 		this.root = { id: '_root', kind: 'root', text: '', blockId: null, children: [], source: null };
 	}
 
@@ -355,7 +421,13 @@ class BodyParser {
 		const source: NodeSource = { range: b.range, subtreeTo: b.range.to, textRange: b.textRange };
 		if (b.headingLevel !== undefined) source.headingLevel = b.headingLevel;
 		if (b.list !== undefined) source.list = b.list;
-		return { id, kind: b.kind, text: b.text, blockId: b.blockId, children: [], source };
+		const node: MapNode = { id, kind: b.kind, text: b.text, blockId: b.blockId, children: [], source };
+		if (b.notes) {
+			source.notes = b.notes.source;
+			if (b.notes.summary) node.summary = b.notes.summary;
+			if (b.notes.frame) node.frame = b.notes.frame;
+		}
+		return node;
 	}
 
 	/** Attach a non-heading node at a column; list items stay open for children. */
@@ -409,8 +481,7 @@ class BodyParser {
 			const rest = t.slice(lead);
 			const h = col <= 3 ? HEADING.exec(rest) : null;
 			if (h) {
-				this.heading(line, lead + h[0].length, (h[1] ?? '#').length);
-				i++;
+				i = this.heading(i, lead + h[0].length, (h[1] ?? '#').length);
 				continue;
 			}
 			if (HR.test(rest)) {
@@ -443,25 +514,67 @@ class BodyParser {
 		return this.root;
 	}
 
-	private heading(line: Line, contentStart: number, level: number): void {
+	/** The heading on line `i`, with its comment line under it when there is one (contract 4.11.6); returns the next line. */
+	private heading(i: number, contentStart: number, level: number): number {
+		const line = this.lines[i];
 		this.list = [];
 		while (this.headings.length > 0 && (this.headings[this.headings.length - 1]?.level ?? 0) >= level) {
 			this.headings.pop();
 		}
-		const span = spanOf(line.text, contentStart, line.text.length, true);
-		const hashes = CLOSING_HASHES.exec(line.text.slice(span.from, span.to));
-		if (hashes) span.to = span.from + hashes.index;
+		let { span, notes } = headingText(line.text, line.from, contentStart, true);
+		let text = decodeBreaks(line.text.slice(span.from, span.to));
+		if (notes && !notableText('heading', text)) {
+			span = headingText(line.text, line.from, contentStart, false).span;
+			notes = null;
+			text = decodeBreaks(line.text.slice(span.from, span.to));
+		}
+		const below = this.lines[i + 1];
+		const own = below && i + 1 !== this.skipLine && notableText('heading', text) ? ownNotes(below) : null;
+		if (own) {
+			if (this.headings.length === 0 && this.root.children.length === 0) this.firstHeadingNotesLine = i + 1;
+			// the comment line wins for each kind it holds; a line-end comment of that kind is text again,
+			// and so is any line-end comment before it (no longer at the end of the line)
+			if (notes) {
+				const s = notes.source;
+				const dropped = [own.summary && s.summary ? s.summary.to : -1, own.frame && s.frame ? s.frame.to : -1];
+				const cut = Math.max(...dropped);
+				if (cut >= 0) {
+					const kept: Notes = { source: {} };
+					if (notes.summary && s.summary && s.summary.from >= cut && !own.summary) {
+						kept.summary = notes.summary;
+						kept.source.summary = s.summary;
+					}
+					if (notes.frame && s.frame && s.frame.from >= cut && !own.frame) {
+						kept.frame = notes.frame;
+						kept.source.frame = s.frame;
+					}
+					span.to = cut - line.from;
+					text = decodeBreaks(line.text.slice(span.from, span.to));
+					notes = kept.summary || kept.frame ? kept : null;
+				}
+			}
+			const merged: Notes = { source: { ...(notes?.source ?? {}), ...own.source } };
+			const summary = own.summary ?? notes?.summary;
+			const frame = own.frame ?? notes?.frame;
+			if (summary) merged.summary = summary;
+			if (frame) merged.frame = frame;
+			if (!own.summary && notes?.source.summary) merged.source.summary = notes.source.summary;
+			if (!own.frame && notes?.source.frame) merged.source.frame = notes.source.frame;
+			notes = merged;
+		}
 		const node = this.make({
 			kind: 'heading',
-			text: decodeBreaks(line.text.slice(span.from, span.to)),
+			text,
 			blockId: span.blockId,
-			range: { from: line.from, to: line.to },
+			range: { from: line.from, to: own && below ? below.to : line.to },
 			textRange: { from: line.from + span.from, to: line.from + span.to },
 			headingLevel: level,
+			...(notes ? { notes } : {}),
 		});
 		const parent = this.headings[this.headings.length - 1]?.node ?? this.root;
 		parent.children.push(node);
 		this.headings.push({ level, node });
+		return own ? i + 2 : i + 1;
 	}
 
 	private listItem(i: number, m: RegExpExecArray): number {
@@ -503,29 +616,39 @@ class BodyParser {
 		let j = i + 1;
 		while (j < lines.length && !this.interrupts(j, quote ? 'quote' : 'item')) j++;
 		const last = lines[j - 1] ?? line;
-		let text: string;
-		let blockId = first.blockId;
-		let textRange: Range | null = null;
-		if (j === i + 1) {
-			text = line.text.slice(first.from, first.to);
-			textRange = { from: line.from + first.from, to: line.from + first.to };
-		} else {
-			const parts = [line.text.slice(first.from).trimEnd()];
-			for (let k = i + 1; k < j - 1; k++) parts.push((lines[k]?.text ?? '').trim());
-			const tail = spanOf(last.text, 0, last.text.length, false);
-			parts.push(last.text.slice(tail.from, tail.to));
-			blockId = tail.blockId;
-			text = parts.join('\n');
-		}
-		text = decodeBreaks(text);
-		if (text.startsWith('\\>')) text = text.slice(1);
+		const build = (withNotes: boolean): { text: string; blockId: string | null; textRange: Range | null; notes: Notes | null } => {
+			let text: string;
+			let blockId = first.blockId;
+			let textRange: Range | null = null;
+			let notes: Notes | null = null;
+			if (j === i + 1) {
+				const span = { from: first.from, to: first.to };
+				if (withNotes) notes = cutNotes(line.text, line.from, span, true);
+				text = line.text.slice(span.from, span.to);
+				textRange = { from: line.from + span.from, to: line.from + span.to };
+			} else {
+				const parts = [line.text.slice(first.from).trimEnd()];
+				for (let k = i + 1; k < j - 1; k++) parts.push((lines[k]?.text ?? '').trim());
+				const tail = spanOf(last.text, 0, last.text.length, false);
+				if (withNotes) notes = cutNotes(last.text, last.from, tail, false);
+				parts.push(last.text.slice(tail.from, tail.to));
+				blockId = tail.blockId;
+				text = parts.join('\n');
+			}
+			text = decodeBreaks(text);
+			if (text.startsWith('\\>')) text = text.slice(1);
+			return { text, blockId, textRange, notes };
+		};
+		let built = build(true);
+		if (built.notes && !notableText('list', built.text)) built = build(false);
 		const node = this.make({
 			kind: 'list',
-			text,
-			blockId,
+			text: built.text,
+			blockId: built.blockId,
 			range: { from: line.from, to: last.to },
-			textRange,
+			textRange: built.textRange,
 			list,
+			...(built.notes ? { notes: built.notes } : {}),
 		});
 		this.attach(node, col, true);
 		return j;
@@ -540,13 +663,21 @@ class BodyParser {
 		const parts: string[] = [];
 		for (let k = i; k < j - 1; k++) parts.push((lines[k]?.text ?? '').trim());
 		const tail = spanOf(last.text, 0, last.text.length, false);
-		parts.push(last.text.slice(tail.from, tail.to));
+		const full = tail.to;
+		let notes = cutNotes(last.text, last.from, tail, false);
+		let text = decodeBreaks([...parts, last.text.slice(tail.from, tail.to)].join('\n'));
+		if (notes && !notableText('paragraph', text)) {
+			notes = null;
+			tail.to = full;
+			text = decodeBreaks([...parts, last.text.slice(tail.from, tail.to)].join('\n'));
+		}
 		return {
 			kind: 'paragraph',
-			text: decodeBreaks(parts.join('\n')),
+			text,
 			blockId: tail.blockId,
 			range: { from: first.from, to: last.to },
 			textRange: i === j - 1 ? { from: last.from + tail.from, to: last.from + tail.to } : null,
+			...(notes ? { notes } : {}),
 		};
 	}
 
@@ -617,6 +748,22 @@ class BodyParser {
 	}
 }
 
+/** The root cannot be a summary or have a frame (contract 4.11.1): its comments stay text. */
+function unnoteRoot(text: string, root: MapNode): void {
+	const s = root.source;
+	if (!s?.notes) return;
+	const line = text.slice(s.range.from, s.range.to);
+	const lead = leadLength(line);
+	const h = HEADING.exec(line.slice(lead));
+	if (!h) return;
+	const { span } = headingText(line, s.range.from, lead + h[0].length, false);
+	root.text = decodeBreaks(line.slice(span.from, span.to));
+	s.textRange = { from: s.range.from + span.from, to: s.range.from + span.to };
+	delete s.notes;
+	delete root.summary;
+	delete root.frame;
+}
+
 function fillSubtree(node: MapNode): number {
 	let end = node.source?.range.to ?? 0;
 	for (const c of node.children) end = Math.max(end, fillSubtree(c));
@@ -631,11 +778,21 @@ export function parseDocument(text: string): ParsedDoc {
 	const nl = text.indexOf('\n');
 	const lineEnding = nl > 0 && text[nl - 1] === '\r' ? '\r\n' : '\n';
 
-	const parser = new BodyParser(splitLines(text, bodyFrom));
+	const lines = splitLines(text, bodyFrom);
+	const parser = new BodyParser(lines);
 	let root = parser.parse();
+	const isRoot = (r: MapNode): boolean => {
+		const only = r.children[0];
+		return r.children.length === 1 && only?.kind === 'heading' && only.source?.headingLevel === 1;
+	};
+	// the document root has no comments (4.11.1): its comment line is read again as an ordinary line
+	if (isRoot(root) && parser.firstHeadingNotesLine >= 0) root = new BodyParser(lines, parser.firstHeadingNotesLine).parse();
 	const only = root.children[0];
-	const virtualRoot = !(root.children.length === 1 && only?.kind === 'heading' && only.source?.headingLevel === 1);
-	if (!virtualRoot && only) root = only;
+	const virtualRoot = !isRoot(root);
+	if (!virtualRoot && only) {
+		root = only;
+		unnoteRoot(text, root);
+	}
 	fillSubtree(root);
 
 	const collapsed = new Set<string>();

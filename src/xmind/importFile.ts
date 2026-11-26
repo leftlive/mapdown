@@ -9,7 +9,6 @@ import { VIEW_TYPE } from '../view/MapView.ts';
 import { readXmind, sheetNoteNames, sheetToNote, XmindImportError, type SkippedKind, type XmindDocument } from './read.ts';
 
 const SKIPPED_LABELS: Record<SkippedKind, StringKey> = {
-	summary: 'xmind-skip-summary',
 	boundary: 'xmind-skip-boundary',
 	relationship: 'xmind-skip-relationship',
 	callout: 'xmind-skip-callout',
@@ -50,8 +49,8 @@ export async function importXmindFile(plugin: MapdownPlugin, data: ArrayBuffer, 
 	} catch (err) {
 		console.error('Failed to create the imported note:', err);
 		for (const file of created) {
-			// Our own file, created a moment ago: remove it for good (trashFile needs Obsidian 1.6.6).
-			await vault.delete(file).catch(() => undefined);
+			// Our own file, created a moment ago: remove it, following the user's deletion preference.
+			await plugin.app.fileManager.trashFile(file).catch(() => undefined);
 		}
 		new Notice(t('xmind-create-failed'));
 		return [];

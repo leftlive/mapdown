@@ -221,6 +221,47 @@ export function barPosition(sel: Rect | null, bar: { width: number; height: numb
 	return { x, y: top };
 }
 
+/** Where the marker palette (spec 5.14) is opened from: beside a node (outer side), left of a toolbar button, below a bar. */
+export interface PaletteAnchor {
+	side: "right" | "left" | "below";
+	rect: Rect;
+}
+
+/**
+ * Top-left corner of the marker palette (spec 5.14): `gap` away from the anchor on its side (top edges
+ * aligned beside it, centred below or above it). Order: right anchor: right, left, below, above; left
+ * anchor: left, below, above; below anchor: below, above. The first spot that fits `area` (with `gap`
+ * to spare) is used; beside spots are only moved vertically to fit. Nothing fits: the preferred spot
+ * pushed inside the area (top-left corner at the area's when it is too large).
+ */
+export function palettePosition(anchor: PaletteAnchor, size: { width: number; height: number }, area: Rect, gap: number): Point {
+	const r = anchor.rect;
+	const clamp = (v: number, lo: number, hi: number): number => Math.max(lo, Math.min(hi, v));
+	const minX = area.x + gap;
+	const maxX = Math.max(minX, area.x + area.width - gap - size.width);
+	const minY = area.y + gap;
+	const maxY = Math.max(minY, area.y + area.height - gap - size.height);
+	const clampX = (x: number): number => clamp(x, minX, maxX);
+	const clampY = (y: number): number => clamp(y, minY, maxY);
+	const fits = (p: Point): boolean => p.x >= minX && p.x <= maxX && p.y >= minY && p.y <= maxY;
+	const midX = r.x + r.width / 2 - size.width / 2;
+	const rightOf: Point = { x: r.x + r.width + gap, y: r.y };
+	const leftOf: Point = { x: r.x - gap - size.width, y: r.y };
+	// below / above: centred on the anchor, then pushed sideways (never vertically, so the anchor stays free)
+	const under: Point = { x: clampX(midX), y: r.y + r.height + gap };
+	const over: Point = { x: clampX(midX), y: r.y - gap - size.height };
+	// beside: top edges aligned, the vertical clamp may not push it onto the anchor (it is beside it)
+	const beside = (p: Point): Point => ({ x: p.x, y: clampY(p.y) });
+	const order: Point[] =
+		anchor.side === "right" ? [beside(rightOf), beside(leftOf), under, over]
+		: anchor.side === "left" ? [beside(leftOf), under, over]
+		: [under, over];
+	for (const p of order) if (fits(p)) return p;
+	// nothing fits completely: the preferred spot, pushed inside the area
+	const first: Point = anchor.side === "right" ? rightOf : anchor.side === "left" ? leftOf : { x: midX, y: r.y + r.height + gap };
+	return { x: clampX(first.x), y: clampY(first.y) };
+}
+
 /**
  * Presentation camera (spec 5.13): `box` centred in `area` with `pad` pixels around, at the largest
  * zoom that fits, kept within [minScale, maxScale] (and the general zoom limits).

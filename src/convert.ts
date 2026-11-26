@@ -27,7 +27,7 @@ export async function openPlainNoteAsMap(plugin: MapdownPlugin, file: TFile, lea
 export async function convertInPlace(plugin: MapdownPlugin, file: TFile, leaf: WorkspaceLeaf): Promise<void> {
 	plugin.setFileMode(leaf, file.path, 'mindmap');
 	await leaf.setViewState({ type: VIEW_TYPE, state: { file: file.path }, active: true });
-	plugin.app.workspace.setActiveLeaf(leaf, { focus: true });
+	await plugin.showLeaf(leaf);
 	const view = leaf.view;
 	if (view instanceof MapView && view.file === file) view.beginConversion();
 }
@@ -43,7 +43,7 @@ export async function saveAsNewMap(plugin: MapdownPlugin, file: TFile): Promise<
 	const leaf = app.workspace.getLeaf('tab');
 	// The metadata cache has not seen the new file yet: name the view type.
 	await leaf.setViewState({ type: VIEW_TYPE, state: { file: created.path }, active: true });
-	app.workspace.setActiveLeaf(leaf, { focus: true });
+	await plugin.showLeaf(leaf);
 	return created;
 }
 

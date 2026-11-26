@@ -35,8 +35,19 @@ import {
 	type Form,
 	type NewNode,
 } from './serialize.ts';
+import {
+	canHaveNotes,
+	cleanLabel,
+	frameComment,
+	planRoot,
+	planSummaries,
+	notesLine,
+	rawNotes,
+	summaryComment,
+	type SummaryPlan,
+} from './summary.ts';
 import { makeTaskKind, taskOf, toggleTaskText } from './tasks.ts';
-import type { EditResult, MapNode, ParsedDoc, Range, TextEdit } from './types.ts';
+import type { EditResult, FrameMark, LayoutDirection, MapNode, ParsedDoc, Range, SummaryMark, TextEdit } from './types.ts';
 
 export interface OpOptions {
 	/** The `headLevel` setting, used only for nodes with no sibling to copy (default 1). */
@@ -64,6 +75,10 @@ export interface NodeInput {
 	text: string;
 	blockId?: string | null;
 	children?: NodeInput[];
+	/** Write the node as a summary (contract 4.11). */
+	summary?: SummaryMark;
+	/** Give the node a frame. */
+	frame?: FrameMark;
 }
 
 // ---------------------------------------------------------------- edits
@@ -639,7 +654,7 @@ function reflow(idx: DocIndex, x: MapNode, form: Form): Block | null {
 		const s = src(node);
 		const next = nodes[i + 1];
 		const lines = splitRegion(text, s.range.from, next ? src(next).range.from : src(x).subtreeTo);
-		const own = splitRegion(text, s.range.from, s.range.to).length;
+		let own = splitRegion(text, s.range.from, s.range.to).length;
 		const t = tx.get(node) ?? KEEP;
 		const converted = t.t === 'heading' || t.t === 'list';
 		let owner = ownerKind(node);
@@ -654,12 +669,22 @@ function reflow(idx: DocIndex, x: MapNode, form: Form): Block | null {
 				if (first) first.text = first.text.replace(/^([ \t]*)#+/, (_m, lead: string) => lead + '#'.repeat(t.level));
 			} else {
 				const brk = lines[own - 1]?.brk ?? '';
-				lines.splice(0, own, { text: headingLine(t.level, node.text, node.blockId), brk });
+				// a heading's comments go on the line under it (4.11.6)
+				const notes = rawNotes(text, node);
+				const head = { text: headingLine(t.level, node.text, node.blockId), brk: notes ? eol : brk };
+				lines.splice(0, own, ...(notes ? [head, { text: notesLine(notes), brk }] : [head]));
+				own = notes ? 2 : 1;
 			}
 		} else if (t.t === 'list') {
 			owner = 'item';
 			const first = lines[0];
-			if (first) first.text = listLine(t.indent, t.marker, node.text, node.blockId, eol);
+			if (first) first.text = listLine(t.indent, t.marker, node.text, node.blockId, eol, rawNotes(text, node));
+			// a heading's comment line joins the item's line
+			if (node.kind === 'heading' && s.notes?.line && own > 1) {
+				const gone = lines.splice(1, 1)[0];
+				if (first && gone) first.brk = gone.brk;
+				own--;
+			}
 		}
 		const head = lines[0];
 		const before = out[out.length - 1];
@@ -920,7 +945,10 @@ export function moveNodes(doc: ParsedDoc, ids: readonly string[], target: Positi
 }
 
 function toNewNode(n: NodeInput): NewNode {
-	return { text: n.text, blockId: n.blockId ?? null, children: (n.children ?? []).map(toNewNode) };
+	const out: NewNode = { text: n.text, blockId: n.blockId ?? null, children: (n.children ?? []).map(toNewNode) };
+	if (n.summary) out.summary = n.summary;
+	if (n.frame) out.frame = n.frame;
+	return out;
 }
 
 /** Create `nodes` (with children) at `target`. */
@@ -1002,7 +1030,10 @@ export function pasteMarkdown(doc: ParsedDoc, markdown: string, target: Position
 		const key = n.blockId?.toLowerCase();
 		const keep = key !== undefined && !used.has(key);
 		if (key !== undefined) used.add(key);
-		return { text: n.text, blockId: keep ? n.blockId : null, children: n.children.map(convert) };
+		const out: NodeInput = { text: n.text, blockId: keep ? n.blockId : null, children: n.children.map(convert) };
+		if (n.summary) out.summary = n.summary;
+		if (n.frame) out.frame = n.frame;
+		return out;
 	};
 	return insertNodes(doc, tops.map(convert), target, opts);
 }
@@ -1084,12 +1115,21 @@ function spanEdit(text: string, span: Range, enc: string): TextEdit {
 
 const BLOCK_ID_TAIL = /[ \t]+\^[A-Za-z0-9-]+[ \t]*$/;
 
-/** Where the text of a node's last line ends (before a block id and trailing space). */
+/** End of a node's last own text line: its range end, or for a heading with a comment line (4.11.6) the heading line's end. */
+function lineTo(text: string, node: MapNode): number {
+	const s = src(node);
+	return s.notes?.line ? lineEndOf(text, s.range.from) : s.range.to;
+}
+
+/** Where the text of a node's last line ends (before summary and frame comments, a block id and trailing space). */
 function textEnd(text: string, node: MapNode): number {
 	const s = src(node);
-	const line = text.slice(lineStartOf(text, s.range.to), s.range.to);
+	const to = lineTo(text, node);
+	const line = text.slice(lineStartOf(text, to), to);
 	const m = node.blockId !== null ? BLOCK_ID_TAIL.exec(line) : null;
-	let end = m ? s.range.to - (line.length - m.index) : s.range.to;
+	let end = m ? to - (line.length - m.index) : to;
+	const n = s.notes;
+	if (n) end = Math.min(end, n.summary?.from ?? end, n.frame?.from ?? end);
 	while (end > s.range.from && isSpace(text[end - 1])) end--;
 	return end;
 }
@@ -1165,7 +1205,7 @@ function textEdits(idx: DocIndex, node: MapNode, value: string): TextEdit[] | nu
 			// An empty paragraph line would be a blank line; keep the node as an empty list item.
 			if (value.trim() === '') {
 				const indent = emptyItemIndent(idx, node);
-				return indent === null ? null : [{ from: s.range.from, to: s.range.to, insert: listLine(indent, '-', '', node.blockId) }];
+				return indent === null ? null : [{ from: s.range.from, to: s.range.to, insert: listLine(indent, '-', '', node.blockId, eol, rawNotes(text, node)) }];
 			}
 			const enc = encodeText(value, 'paragraph', { eol, pad: lead });
 			if (s.textRange) return [spanEdit(text, s.textRange, enc)];
@@ -1214,6 +1254,51 @@ export function setText(doc: ParsedDoc, id: string, value: string): OpResult | n
 	if (value === node.text) return { edits: [], inverse: [], anchors: [node.source.range.from] };
 	const edits = textEdits(idx, node, value);
 	return edits ? result(doc.text, edits, [node.source.range.from]) : null;
+}
+
+/**
+ * "Toggle quote" on one paragraph or list item (behaviour spec 5.6): a level
+ * of quote (`> `) goes in front of every line of the text, or comes off every
+ * line (`remove`). Only those prefixes are edited, after the indentation of a
+ * continuation line and after a `<br>`; the marker, block id and everything
+ * else stay. A list item is written `- > text` (not escaped as in `setText`).
+ * Null for other nodes, or when the lines of the text cannot be found in the
+ * source.
+ */
+export function setQuote(doc: ParsedDoc, id: string, remove: boolean): OpResult | null {
+	const node = indexDoc(doc).info.get(id)?.node;
+	if (!node?.source || (node.kind !== 'list' && node.kind !== 'paragraph') || node.summary || node.frame) return null;
+	const { text } = doc;
+	const end = textEnd(text, node);
+	const starts: number[] = [];
+	let pos = node.source.range.from;
+	let first = true;
+	while (pos <= end) {
+		const lineEnd = Math.min(lineEndOf(text, pos), end);
+		const line = text.slice(pos, lineEnd);
+		const at = first ? (node.kind === 'list' ? itemTextStart(text, node) : pos + leadLength(line)) : pos + leadLength(line);
+		first = false;
+		starts.push(at);
+		for (const m of text.slice(at, lineEnd).matchAll(/<br>/g)) starts.push(at + m.index + m[0].length);
+		const nl = text.indexOf('\n', lineEnd);
+		if (nl < 0) break;
+		pos = nl + 1;
+	}
+	if (starts.length !== node.text.split('\n').length) return null;
+	const edits: TextEdit[] = [];
+	for (const at of starts) {
+		if (remove) {
+			let n = text.startsWith('\\>', at) ? 2 : text[at] === '>' ? 1 : 0;
+			if (n === 0) return null;
+			if (text[at + n] === ' ') n++;
+			edits.push({ from: at, to: at + n, insert: '' });
+		} else {
+			const next = text[at];
+			const bare = at >= end || next === '\n' || next === '\r' || text.startsWith('<br>', at);
+			edits.push({ from: at, to: at, insert: bare ? '>' : '> ' });
+		}
+	}
+	return result(text, edits, [node.source.range.from]);
 }
 
 /**
@@ -1385,7 +1470,7 @@ export function assignBlockId(doc: ParsedDoc, id: string, blockId: string): OpRe
 		const lead = lastLine.slice(0, leadLength(lastLine));
 		return result(text, [{ from: s.range.to, to: s.range.to, insert: `${eol}${lead}^${blockId}` }], [s.range.from]);
 	}
-	let end = s.range.to;
+	let end = lineTo(text, node);
 	while (end > s.range.from && isSpace(text[end - 1])) end--;
 	return result(text, [{ from: end, to: end, insert: ` ^${blockId}` }], [s.range.from]);
 }
@@ -1403,4 +1488,245 @@ export function uniqueBlockId(doc: ParsedDoc, random: () => number = Math.random
 	let n = used.size;
 	while (used.has(`b${n}`)) n++;
 	return `b${n}`;
+}
+
+// ---------------------------------------------------------------- summaries and frames
+
+/** What to do with one node's comments (contract 4.11): a mark sets it, null removes it, undefined leaves it. */
+export interface MarkChange {
+	id: string;
+	summary?: SummaryMark | null;
+	frame?: FrameMark | null;
+}
+
+export interface MarksResult {
+	/** One op for all changed nodes; null when nothing changes. */
+	result: OpResult | null;
+	/** Ids of the changed nodes in document order (the anchors of `result`, same order). */
+	changed: string[];
+	/** Nodes that were to get a comment but cannot have one: the root, quotes, callouts, code, tables. */
+	skipped: number;
+}
+
+const sameSummary = (a: SummaryMark, b: SummaryMark): boolean => a.count === b.count;
+const sameFrame = (a: FrameMark, b: FrameMark): boolean => (a.label ?? '') === cleanLabel(b.label ?? '');
+
+/** Delete a comment with the one space before it (4.11.5). */
+function dropNote(text: string, r: Range): TextEdit {
+	return { from: isSpace(text[r.from - 1]) ? r.from - 1 : r.from, to: r.to, insert: '' };
+}
+
+/**
+ * Edits that set or remove a node's summary and frame comments. Unchanged
+ * comments keep their spelling; a new or changed one is written canonically,
+ * a new one before the block id with the summary ahead of the frame.
+ */
+function markEdits(text: string, node: MapNode, change: MarkChange, eol: string): TextEdit[] {
+	if (node.kind === 'heading') return headingMarkEdits(text, node, change, eol);
+	const notes = src(node).notes ?? {};
+	const edits: TextEdit[] = [];
+	const end = textEnd(text, node);
+	let addAtEnd = '';
+	const sum = change.summary;
+	if (sum === null && notes.summary) edits.push(dropNote(text, notes.summary));
+	else if (sum) {
+		if (notes.summary) {
+			if (!node.summary || !sameSummary(node.summary, sum)) edits.push({ from: notes.summary.from, to: notes.summary.to, insert: summaryComment(sum) });
+		} else if (notes.frame && change.frame !== null) {
+			edits.push({ from: notes.frame.from, to: notes.frame.from, insert: `${summaryComment(sum)} ` });
+		} else {
+			addAtEnd += ` ${summaryComment(sum)}`;
+		}
+	}
+	const frame = change.frame;
+	if (frame === null && notes.frame) edits.push(dropNote(text, notes.frame));
+	else if (frame) {
+		if (notes.frame) {
+			if (!node.frame || !sameFrame(node.frame, frame)) edits.push({ from: notes.frame.from, to: notes.frame.to, insert: frameComment(frame) });
+		} else if (notes.summary && sum !== null) {
+			edits.push({ from: notes.summary.to, to: notes.summary.to, insert: ` ${frameComment(frame)}` });
+		} else {
+			addAtEnd += ` ${frameComment(frame)}`;
+		}
+	}
+	if (addAtEnd) edits.push({ from: end, to: end, insert: addAtEnd });
+	return edits;
+}
+
+/**
+ * A heading's comment edits (4.11.6). Comments Mapdown adds or changes go on
+ * the line right under the heading (summary first); that line is inserted,
+ * rewritten or deleted as a whole. An unchanged comment stays where it is,
+ * including one at the heading line's end; a changed or removed line-end
+ * comment leaves the heading line.
+ */
+function headingMarkEdits(text: string, node: MapNode, change: MarkChange, eol: string): TextEdit[] {
+	const s = src(node);
+	const notes = s.notes ?? {};
+	const own = notes.line;
+	const onOwn = (r: Range | undefined): boolean => !!r && !!own && r.from >= own.from && r.to <= own.to;
+	const edits: TextEdit[] = [];
+	// the pieces of the comment line after the change, in order; `moved` when the line must be rewritten
+	const pieces: string[] = [];
+	let moved = false;
+	const kind = <M>(r: Range | undefined, current: M | undefined, next: M | null | undefined, same: (a: M, b: M) => boolean, write: (m: M) => string): void => {
+		const keep = next === undefined || (next !== null && current !== undefined && r !== undefined && same(current, next));
+		if (keep) {
+			if (r && onOwn(r)) pieces.push(text.slice(r.from, r.to));
+			return;
+		}
+		if (r) {
+			if (onOwn(r)) moved = true;
+			else edits.push(dropNote(text, r));
+		}
+		if (next) {
+			pieces.push(write(next));
+			moved = true;
+		}
+	};
+	kind(notes.summary, node.summary ?? undefined, change.summary, sameSummary, summaryComment);
+	kind(notes.frame, node.frame ?? undefined, change.frame, sameFrame, frameComment);
+	if (!moved) return edits;
+	const headEnd = lineEndOf(text, s.range.from);
+	const line = pieces.join(' ');
+	const after = lineAfter(text, own ? own.to : headEnd);
+	// a comment line right above `---` or `===` would be read as a setext heading: keep a blank line between
+	const guard = after && SETEXT_UNDERLINE.test(after.text) ? eol : '';
+	if (own && line) edits.push({ from: own.from, to: own.to, insert: line + guard });
+	else if (own) {
+		const next = after && isBlank(after.text) ? lineAfter(text, after.to) : null;
+		const to = after && next && SETEXT_UNDERLINE.test(next.text) ? after.to : own.to;
+		edits.push({ from: headEnd, to, insert: '' });
+	} else if (line) edits.push({ from: headEnd, to: headEnd, insert: eol + line + guard });
+	return edits;
+}
+
+/** A line Obsidian could read as a setext heading's underline under a paragraph line. */
+const SETEXT_UNDERLINE = /^ {0,3}(?:=+|-+)[ \t]*$/;
+
+/** The line after the one whose content ends at `end`: its content range and text; null at the end. */
+function lineAfter(text: string, end: number): { from: number; to: number; text: string } | null {
+	const from = nextLineStart(text, end);
+	if (from < 0) return null;
+	const to = lineEndOf(text, from);
+	return { from, to, text: text.slice(from, to) };
+}
+
+/**
+ * Set or remove summary and frame comments on several nodes as one op (for
+ * "add/remove summary", "toggle boundary", "boundary label", spec 5.15).
+ * Nodes that cannot have them are skipped and counted when a comment was to
+ * be added.
+ */
+export function setMarks(doc: ParsedDoc, changes: readonly MarkChange[]): MarksResult {
+	const idx = indexDoc(doc);
+	const { text } = doc;
+	const found: { node: MapNode; edits: TextEdit[] }[] = [];
+	let skipped = 0;
+	const seen = new Set<string>();
+	for (const change of changes) {
+		if (seen.has(change.id)) continue;
+		seen.add(change.id);
+		const node = idx.info.get(change.id)?.node;
+		if (!node) continue;
+		if (!canHaveNotes(node, doc.root)) {
+			if (change.summary || change.frame) skipped++;
+			continue;
+		}
+		const edits = markEdits(text, node, change, doc.lineEnding);
+		if (edits.length > 0) found.push({ node, edits });
+	}
+	if (found.length === 0) return { result: null, changed: [], skipped };
+	found.sort((a, b) => src(a.node).range.from - src(b.node).range.from);
+	const edits = found.flatMap((c) => c.edits);
+	// every edit lies after its node's line start, so a line start moves by the edits before it
+	const anchors = found.map((c) => {
+		const at = src(c.node).range.from;
+		let delta = 0;
+		for (const e of edits) if (e.from < at) delta += e.insert.length - (e.to - e.from);
+		return at + delta;
+	});
+	return { result: result(text, edits, anchors), changed: found.map((c) => c.node.id), skipped };
+}
+
+/** Set or remove one node's summary comment; null when nothing changes or the node cannot have one. */
+export function setSummary(doc: ParsedDoc, id: string, mark: SummaryMark | null): OpResult | null {
+	return setMarks(doc, [{ id, summary: mark }]).result;
+}
+
+/** Set or remove one node's frame comment (with its label); null when nothing changes or the node cannot have one. */
+export function setFrame(doc: ParsedDoc, id: string, mark: FrameMark | null): OpResult | null {
+	return setMarks(doc, [{ id, frame: mark }]).result;
+}
+
+export interface AddSummaryOptions extends OpOptions {
+	/** Layout direction; at the root of a two-sided map the selection must lie on one side (spec 5.15). Default 'right'. */
+	direction?: LayoutDirection;
+}
+
+export interface AddSummaryResult {
+	result: OpResult;
+	/** The comment of the new summary. */
+	mark: SummaryMark;
+}
+
+/** Why "add summary" cannot take a selection: not adjacent siblings that can be covered, or already covered by a summary. */
+export type SummaryRefusal = 'siblings' | 'covered';
+
+interface SummaryTarget {
+	parent: MapNode;
+	first: number;
+	last: number;
+	marks: (SummaryMark | undefined)[];
+	plan: (marks: readonly (SummaryMark | undefined)[]) => SummaryPlan;
+}
+
+function summaryTarget(doc: ParsedDoc, ids: readonly string[], direction: LayoutDirection): SummaryTarget | SummaryRefusal {
+	const idx = indexDoc(doc);
+	const infos = [...new Set(ids)].map((id) => idx.info.get(id));
+	const parent = infos[0]?.parent;
+	if (!parent) return 'siblings';
+	const at: number[] = [];
+	for (const info of infos) {
+		if (!info || info.parent !== parent || !canHaveNotes(info.node, doc.root)) return 'siblings';
+		at.push(info.index);
+	}
+	at.sort((a, b) => a - b);
+	const first = at[0] ?? 0;
+	const last = at[at.length - 1] ?? 0;
+	if (last - first + 1 !== at.length) return 'siblings';
+	const marks = parent.children.map((c) => c.summary);
+	const plan = parent === doc.root ? (m: readonly (SummaryMark | undefined)[]) => planRoot(m, direction) : (m: readonly (SummaryMark | undefined)[]) => planSummaries(m);
+	const now = plan(marks);
+	for (let i = first; i <= last; i++) if (now.sides[i] !== now.sides[first]) return 'siblings';
+	for (let i = first; i <= last; i++) if (now.covers[i]) return 'covered';
+	for (const c of now.covers) if (c && c.first <= last && c.last >= first) return 'covered';
+	return { parent, first, last, marks, plan };
+}
+
+/** Whether "add summary" refuses `ids` (spec 5.15), and why; null when it can add one. */
+export function summaryRefusal(doc: ParsedDoc, ids: readonly string[], direction: LayoutDirection = 'right'): SummaryRefusal | null {
+	const t = summaryTarget(doc, ids, direction);
+	return typeof t === 'string' ? t : null;
+}
+
+/**
+ * "Add summary" (spec 5.15): a new empty summary node right after the last
+ * of `ids`, covering exactly them. `ids` must be one node or adjacent
+ * siblings under one parent (on one side at the root of a two-sided map), not
+ * the root, nodes that cannot be covered (quotes, code, tables), summaries
+ * that hold or nodes another summary covers (`summaryRefusal` says which).
+ * Written `%%summary%%` when the default range covers exactly them, else
+ * `%%summary:N%%`. No other summary's range changes. One op; the anchor is
+ * the new node. Null when the selection does not qualify.
+ */
+export function addSummary(doc: ParsedDoc, ids: readonly string[], opts: AddSummaryOptions = {}): AddSummaryResult | null {
+	const t = summaryTarget(doc, ids, opts.direction ?? 'right');
+	if (typeof t === 'string') return null;
+	const { first, last, marks } = t;
+	const next = [...marks.slice(0, last + 1), {}, ...marks.slice(last + 1)];
+	const c = t.plan(next).covers[last + 1];
+	const mark: SummaryMark = c?.first === first ? {} : { count: last - first + 1 };
+	const result = insertNodes(doc, [{ text: '', summary: mark }], { parentId: t.parent.id, index: last + 1 }, opts);
+	return result ? { result, mark } : null;
 }

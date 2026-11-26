@@ -10,8 +10,10 @@
 import { Platform, setIcon } from "obsidian";
 import type { LayoutDirection, MapNode, Point, Size } from "../core/types.ts";
 import { taskOf } from "../core/tasks.ts";
+import { presetOf, splitMarkers } from "../core/markers.ts";
+import { t } from "../i18n.ts";
 import { CARD_MARK, CARD_MARKS, cardSlots, type CardSlot } from "../core/mapCard.ts";
-import { branchLook, createLayouter, edgePath, type LayoutInput, type LayoutResult, type NodePlacement } from "../core/layout.ts";
+import { FRAME_RADIUS, bracePath, branchLook, createLayouter, edgePath, type FrameBox, type LayoutInput, type LayoutResult, type NodePlacement, type SummaryBrace } from "../core/layout.ts";
 import type { PresentLook } from "../core/presentation.ts";
 import {
 	DOM,
@@ -25,7 +27,7 @@ import {
 	type RenderHost,
 	type RenderModel,
 } from "./contract.ts";
-import { isElement, isNode } from "./domSafe.ts";
+import { detachedEl, isElement, isNode } from "./domSafe.ts";
 import { insertAt, toggleWrap as toggleWrapText, type TextSel } from "./editText.ts";
 import {
 	MEASURE_SENTINEL,
@@ -38,7 +40,10 @@ import {
 	estimateSize,
 	fontFor,
 	isPlainText,
+	labelFont,
+	labelSize,
 	markdownSource,
+	markerFont,
 	progressFont,
 	sizeKey,
 	withCardMarks,
@@ -152,6 +157,8 @@ interface Item {
 	decor: NodeDecor | null;
 	/** The task's bracket character; null when the node is no task. */
 	taskChar: string | null;
+	/** Markers drawn before the text (spec 5.14); null when there are none. */
+	markers: string[] | null;
 	/** What the decor looks like (done or open, all done, read-only); a change rewrites it, not the size. */
 	decorSig: string;
 	/** Every task below is done (the label takes the "complete" colour). */
@@ -172,6 +179,9 @@ interface NodeView {
 	/** The checkbox's click target and the theme-styled input inside it. */
 	check: HTMLElement | null;
 	checkInput: HTMLInputElement | null;
+	/** The run of markers before the text (spec 5.14) and what it shows. */
+	markers: HTMLElement | null;
+	markersKey: string;
 	progress: HTMLElement | null;
 	/** Text currently written into `text`; null forces a rewrite. */
 	textKey: string | null;
@@ -208,7 +218,27 @@ interface PathView {
 	fromRoot: boolean;
 	/** Dashed edge from the drop parent to a placeholder. */
 	drop: boolean;
+	/** Inside a summary's subtree (spec 5.15). */
+	muted: boolean;
 }
+
+/** A frame's rect and label pill (spec 5.15), keyed by the framed node. */
+interface FrameView {
+	rect: SVGRectElement;
+	label: HTMLElement | null;
+	key: string;
+	labelKey: string;
+}
+
+/** A summary's brace: the drawn path and the wider hit path, keyed by the summary. */
+interface BraceView {
+	path: SVGPathElement;
+	hit: SVGPathElement;
+	d: string;
+}
+
+/** Border and edge colour inside a summary's subtree (spec 5.15). */
+const MUTED_COLOR = "var(--text-muted)";
 
 interface EditState {
 	id: string;
@@ -296,6 +326,10 @@ class Renderer implements MapRenderer {
 	private toggleDown: number | null = null;
 	/** Pointer that went down on a task checkbox; its click toggles the task. */
 	private taskDown: number | null = null;
+	/** Pointer that went down on a node's marker (spec 5.14); a click (not a drag) opens the palette. */
+	private markerDown: number | null = null;
+	/** Pointer that went down on a frame's label pill (spec 5.15); a double click there edits the label. */
+	private labelDown: number | null = null;
 	/** A map card was pressed (spec 5.10); its click opens the map. */
 	private cardDown: number | null = null;
 	/** Focus mode on a non-root node: the side and colour its branch has in the whole map. */
@@ -304,6 +338,12 @@ class Renderer implements MapRenderer {
 	private colors = new Map<string, string>();
 	private views = new Map<string, NodeView>();
 	private paths = new Map<string, PathView>();
+	private frameViews = new Map<string, FrameView>();
+	private braceViews = new Map<string, BraceView>();
+	/** SVG behind the edges holding frames and braces (spec 5.15). */
+	private readonly decor: SVGSVGElement;
+	private readonly frameGroup: SVGGElement;
+	private readonly braceGroup: SVGGElement;
 	private vp: Viewport = { x: 0, y: 0, scale: 1 };
 	private width = 0;
 	private height = 0;
@@ -352,6 +392,10 @@ class Renderer implements MapRenderer {
 		this.rootEl.setAttr("role", "tree");
 		this.rootEl.setAttr("aria-multiselectable", "true");
 		this.canvas = this.rootEl.createDiv({ cls: DOM.canvas });
+		this.decor = this.canvas.createSvg("svg", { cls: DOM.decor });
+		this.decor.setAttr("aria-hidden", "true");
+		this.frameGroup = this.decor.createSvg("g");
+		this.braceGroup = this.decor.createSvg("g");
 		this.svg = this.canvas.createSvg("svg", { cls: DOM.edges });
 		this.svg.setAttr("aria-hidden", "true");
 		this.gate = new MeasureGate(
@@ -597,6 +641,11 @@ class Renderer implements MapRenderer {
 		for (const [id, pv] of this.paths) {
 			this.presentClass(pv.el, id, false);
 		}
+		for (const [id, fv] of this.frameViews) {
+			this.presentClass(fv.rect, id, false);
+			if (fv.label) this.presentClass(fv.label, id, false);
+		}
+		for (const [id, bv] of this.braceViews) this.presentClass(bv.path, id, false);
 	}
 
 	presentCamera(camera: PresentCamera, animate: boolean): void {
@@ -770,6 +819,8 @@ class Renderer implements MapRenderer {
 		this.rootEl.remove();
 		this.views.clear();
 		this.paths.clear();
+		this.frameViews.clear();
+		this.braceViews.clear();
 		this.items.clear();
 		this.order = [];
 		this.settleIds.clear();
@@ -792,11 +843,21 @@ class Renderer implements MapRenderer {
 		while (stack.length > 0) {
 			const { node, depth, parent } = stack.pop() as { node: MapNode; depth: number; parent: string | null };
 			const font = fontFor(baseDepth + depth, model.fontSize);
-			// a task's `[ ]` is drawn as a checkbox; plain or rich is decided on the rest (spec 5.9)
+			// a task's `[ ]` is drawn as a checkbox, the markers after it on their own (spec 5.9, 5.14);
+			// plain or rich is decided on the rest
 			const task = taskOf(node.text, node.kind);
+			const split = splitMarkers(node.text, node === model.root ? "root" : node.kind); // the root has no markers (spec 5.14)
+			const marks = split.markers.length > 0 ? split.markers.map((m) => m.emoji) : null;
 			const count = model.taskProgress?.get(node.id);
-			const decor: NodeDecor | null = task || count ? { task: task !== null, progress: count ? `${count.done}/${count.total}` : null } : null;
-			const own = task ? node.text.slice(task.length) : node.text;
+			const own = split.rest;
+			const decor: NodeDecor | null =
+				task || count || marks
+					? {
+							task: task !== null,
+							progress: count ? `${count.done}/${count.total}` : null,
+							...(marks ? { markers: marks, markersOnly: own === "" } : {}),
+						}
+					: null;
 			const shown = node.text === "" ? model.placeholder : own;
 			// a map embed is drawn as a card, never rendered by Obsidian (spec 5.10)
 			const slots = model.mapCards && node.text !== "" && node.kind !== "code" ? cardSlots(own, model.mapCards) : null;
@@ -814,7 +875,10 @@ class Renderer implements MapRenderer {
 				drawn: slots?.text ?? shown,
 				decor,
 				taskChar: task ? task.char : null,
-				decorSig: decor ? `${task ? task.char : ""}|${count && count.done === count.total ? "c" : ""}|${model.readOnly ? "r" : ""}` : "",
+				markers: marks,
+				decorSig: decor
+					? `${task ? task.char : ""}|${count && count.done === count.total ? "c" : ""}|${model.readOnly ? "r" : ""}|${marks ? marks.join(" ") : ""}`
+					: "",
 				complete: count !== undefined && count.done === count.total,
 				collapsed: hidden,
 				kids: [],
@@ -834,7 +898,8 @@ class Renderer implements MapRenderer {
 		this.layoutRoot = start.id;
 		this.baseDepth = baseDepth;
 		const top = start === model.root ? -1 : model.root.children.findIndex((c) => c === start || depthOf(c, start.id) > 0);
-		this.focusLook = top < 0 ? null : branchLook(top, model.root.children.length, model.direction, model.palette);
+		this.focusLook =
+			top < 0 ? null : branchLook(top, model.root.children.length, model.direction, model.palette, model.root.children.map((c) => c.summary));
 	}
 
 	private layoutInput(): LayoutInput | null {
@@ -844,6 +909,12 @@ class Renderer implements MapRenderer {
 		for (const id of this.order) {
 			const item = this.items.get(id) as Item;
 			const input: LayoutInput = { id, size: this.sizeOf(item), collapsed: item.collapsed, children: [] };
+			// summary and frame comments (spec 5.15); the root of what is drawn has neither
+			const node = item.node;
+			if (item.parent !== null) {
+				if (node.summary) input.summary = node.summary;
+				if (node.frame) input.frame = node.frame.label ? { label: this.labelSizeOf(node.frame.label, item.font) } : {};
+			}
 			inputs.set(id, input);
 			if (item.parent === null) root = input;
 			else inputs.get(item.parent)?.children.push(input);
@@ -858,6 +929,11 @@ class Renderer implements MapRenderer {
 		return root;
 	}
 
+	/** Size of the label pill of a frame on a node with `font`. */
+	private labelSizeOf(label: string, font: NodeFont): Size {
+		return labelSize(label, font, this.measureFn(labelFont(font)));
+	}
+
 	/** Size of a visible node if it sat at layout depth `depth` (a drop can change its level). */
 	private sizeAtDepth(id: string, depth: number): Size {
 		const item = this.items.get(id) as Item;
@@ -870,8 +946,7 @@ class Renderer implements MapRenderer {
 
 	/** Canvas estimate of a node at `font`, checkbox and progress label included. */
 	private estimate(item: Item, font: NodeFont): Size {
-		const decor = item.decor ? decorWidths(item.decor, font, this.measureFn(progressFont(font))) : undefined;
-		// measureFn(progressFont) switched the context's font; get the text measurer after it
+		const decor = item.decor ? decorWidths(item.decor, font, this.measureFn(progressFont(font)), this.measureFn(markerFont(font))) : undefined;
 		const text = this.measureFn(font);
 		const measure = item.cards ? withCardMarks(text, item.cards.map((c) => c.label), font.px, CARD_MARK) : text;
 		return estimateSize(item.drawn, font, this.model?.nodeMaxWidth ?? 800, measure, decor);
@@ -888,17 +963,21 @@ class Renderer implements MapRenderer {
 
 	private measureFn(font: NodeFont): (s: string) => number {
 		if (!this.measureCtx) {
-			const canvas = this.doc.createElement("canvas"); // detached: Document.createEl would append to the document
+			const canvas = detachedEl(this.doc, "canvas"); // detached (not in the document), made by the view's own window
 			this.measureCtx = canvas.getContext("2d");
+			this.measureFont = "";
 		}
 		const ctx = this.measureCtx;
 		if (!ctx) return (s) => s.length * font.px * 0.6;
 		const spec = `${font.weight} ${font.px}px ${this.fontFamily || "sans-serif"}`;
-		if (spec !== this.measureFont) {
-			ctx.font = spec;
-			this.measureFont = spec;
-		}
-		return (s) => ctx.measureText(s).width;
+		// measurers of several fonts share the context: each sets its own font when it is not the current one
+		return (s) => {
+			if (spec !== this.measureFont) {
+				ctx.font = spec;
+				this.measureFont = spec;
+			}
+			return ctx.measureText(s).width;
+		};
 	}
 
 	// ---- frame --------------------------------------------------------------
@@ -988,9 +1067,12 @@ class Renderer implements MapRenderer {
 		this.updateMinimap(lay);
 		this.colors.clear();
 		for (const e of lay.edges) this.colors.set(e.childId, e.color);
+		// a summary has no edge; it and its subtree use the neutral colour (spec 5.15)
+		for (const p of lay.nodes.values()) if (p.muted) this.colors.set(p.id, MUTED_COLOR);
 		if (this.focusLook && this.layoutRoot) this.colors.set(this.layoutRoot, this.focusLook.color);
 		this.writeNodes(model, lay, dom, animate ? created : null);
 		this.writeEdges(lay);
+		this.writeMarks(lay);
 		if (vp !== this.vp) this.setViewport(vp);
 		else this.applyTransform();
 		this.sizes.prune(Math.max(4 * this.order.length, 2000));
@@ -1024,6 +1106,8 @@ class Renderer implements MapRenderer {
 			text: content,
 			check: null,
 			checkInput: null,
+			markers: null,
+			markersKey: "",
 			progress: null,
 			textKey: null,
 			decorSig: null,
@@ -1094,10 +1178,15 @@ class Renderer implements MapRenderer {
 		view.ready = false;
 		if (!view.rich) this.richObserver.observe(view.content);
 		view.rich = true;
-		const staging = this.doc.createElement("div"); // detached, same realm as the view
+		const staging = detachedEl(this.doc, "div"); // detached (not in the document), made by the view's own window
 		const done = (ok: boolean) => {
 			if (this.destroyed || view.token !== token || this.views.get(view.id) !== view || view.text !== target) return;
 			if (ok) {
+				// foldable callouts are always shown expanded in a node (spec 1.1)
+				for (const c of Array.from(staging.querySelectorAll(".callout.is-collapsed"))) {
+					c.classList.remove("is-collapsed");
+					for (const body of Array.from(c.children)) if (body.classList.contains("callout-content")) (body as HTMLElement).style.removeProperty("display");
+				}
 				if (cards) this.placeCards(staging, cards);
 				target.replaceChildren(...Array.from(staging.childNodes));
 			}
@@ -1158,6 +1247,8 @@ class Renderer implements MapRenderer {
 			view.content.empty();
 			view.check = null;
 			view.checkInput = null;
+			view.markers = null;
+			view.markersKey = "";
 			view.progress = null;
 			view.text = decorated ? view.content.createSpan({ cls: CLS.taskText }) : view.content;
 			view.textKey = null;
@@ -1181,6 +1272,7 @@ class Renderer implements MapRenderer {
 			view.checkInput = null;
 		}
 		view.el.toggleClass(DOM.taskDone, char !== null && char !== " ");
+		this.writeMarkers(view, item);
 		if (decor?.progress) {
 			if (!view.progress) view.progress = view.content.createSpan({ cls: DOM.taskProgress });
 			view.progress.textContent = decor.progress;
@@ -1188,6 +1280,38 @@ class Renderer implements MapRenderer {
 		} else if (view.progress) {
 			view.progress.remove();
 			view.progress = null;
+		}
+	}
+
+	/**
+	 * The markers (spec 5.14) between the checkbox and the text: one span per emoji, the preset's name as
+	 * its tooltip. Not bold in headings, not struck through in done tasks (styles.css).
+	 */
+	private writeMarkers(view: NodeView, item: Item): void {
+		const marks = item.markers;
+		if (!marks) {
+			view.markers?.remove();
+			view.markers = null;
+			view.markersKey = "";
+			return;
+		}
+		if (!view.markers) {
+			// made inside the node (its own document, popout windows), then put before the text
+			view.markers = view.content.createSpan({ cls: DOM.nodeMarkers });
+			view.content.insertBefore(view.markers, view.text);
+		}
+		const readOnly = this.model?.readOnly === true;
+		const key = `${marks.join(" ")}|${item.decor?.markersOnly ? "!" : ""}|${readOnly ? "r" : ""}`;
+		if (key === view.markersKey) return;
+		view.markersKey = key;
+		const run = view.markers;
+		run.empty();
+		run.toggleClass("is-alone", item.decor?.markersOnly === true);
+		run.toggleClass("is-readonly", readOnly);
+		for (const m of marks) {
+			const preset = presetOf(m);
+			const label = preset ? (preset.arg === undefined ? t(preset.label) : t(preset.label, preset.arg)) : null;
+			run.createSpan({ cls: DOM.nodeMarker, text: m, attr: label ? { [DOM.markerAttr]: m, "aria-label": label } : { [DOM.markerAttr]: m } });
 		}
 	}
 
@@ -1288,6 +1412,7 @@ class Renderer implements MapRenderer {
 			view.el.classList.toggle(DOM.searchCurrent, !presenting && model.searchCurrent === id);
 			this.presentClass(view.el, id, true);
 			view.el.classList.toggle(DOM.focusRoot, model.focusId === id);
+			view.el.classList.toggle(DOM.summaryNode, p.summary === true);
 			const tab = id === focusTarget && !model.readOnly ? 0 : -1;
 			if (tab !== view.tab) {
 				view.el.tabIndex = tab;
@@ -1339,7 +1464,7 @@ class Renderer implements MapRenderer {
 			const d = edgePath(e);
 			let pv = this.paths.get(e.childId);
 			if (!pv) {
-				pv = { el: this.svg.createSvg("path"), d: "", color: "", fromRoot: false, drop: false };
+				pv = { el: this.svg.createSvg("path"), d: "", color: "", fromRoot: false, drop: false, muted: false };
 				this.paths.set(e.childId, pv);
 			}
 			if (drop !== pv.drop) {
@@ -1359,6 +1484,11 @@ class Renderer implements MapRenderer {
 				pv.el.setAttribute("stroke", e.color);
 				pv.color = e.color;
 			}
+			const muted = e.muted === true;
+			if (muted !== pv.muted) {
+				pv.el.toggleClass(DOM.mutedEdge, muted);
+				pv.muted = muted;
+			}
 			this.presentClass(pv.el, e.childId, false);
 		}
 		for (const [id, pv] of this.paths) {
@@ -1375,6 +1505,119 @@ class Renderer implements MapRenderer {
 			this.svg.setAttribute("height", String(r2(b.height + 2 * EDGE_PAD)));
 			this.svg.style.setProperty("transform", `translate(${r2(b.x - EDGE_PAD)}px, ${r2(b.y - EDGE_PAD)}px)`);
 		}
+	}
+
+	/**
+	 * Frames and summary braces (spec 5.15) in the SVG behind the edges, and the frames' label pills in the
+	 * canvas. All of them are drawn, also outside the window: a map has few, and each is cheap.
+	 */
+	private writeMarks(lay: LayoutResult): void {
+		const seenFrames = new Set<string>();
+		let prev: Element | null = null;
+		for (const f of lay.frames) {
+			seenFrames.add(f.id);
+			prev = this.writeFrame(f, prev);
+		}
+		for (const [id, fv] of this.frameViews) {
+			if (seenFrames.has(id)) continue;
+			fv.rect.remove();
+			fv.label?.remove();
+			this.frameViews.delete(id);
+		}
+		const seenBraces = new Set<string>();
+		for (const b of lay.braces) {
+			seenBraces.add(b.summaryId);
+			this.writeBrace(b);
+		}
+		for (const [id, bv] of this.braceViews) {
+			if (seenBraces.has(id)) continue;
+			bv.path.remove();
+			bv.hit.remove();
+			this.braceViews.delete(id);
+		}
+		const b = lay.bounds;
+		const box = `${r2(b.x - EDGE_PAD)} ${r2(b.y - EDGE_PAD)} ${r2(b.width + 2 * EDGE_PAD)} ${r2(b.height + 2 * EDGE_PAD)}`;
+		if (this.decor.getAttribute("viewBox") !== box) {
+			this.decor.setAttribute("viewBox", box);
+			this.decor.setAttribute("width", String(r2(b.width + 2 * EDGE_PAD)));
+			this.decor.setAttribute("height", String(r2(b.height + 2 * EDGE_PAD)));
+			this.decor.style.setProperty("transform", `translate(${r2(b.x - EDGE_PAD)}px, ${r2(b.y - EDGE_PAD)}px)`);
+		}
+	}
+
+	/** Writes frame `f`; its rect goes right after `prev` (layout order: outer frames under inner ones). */
+	private writeFrame(f: FrameBox, prev: Element | null): SVGRectElement {
+		let fv = this.frameViews.get(f.id);
+		if (!fv) {
+			const rect = this.frameGroup.createSvg("rect", { cls: DOM.frame });
+			rect.setAttr(DOM.nodeIdAttr, f.id);
+			fv = { rect, label: null, key: "", labelKey: "" };
+			this.frameViews.set(f.id, fv);
+		}
+		const want = prev ? prev.nextSibling : this.frameGroup.firstChild;
+		if (want !== fv.rect) this.frameGroup.insertBefore(fv.rect, want);
+		const key = `${r2(f.x)} ${r2(f.y)} ${r2(f.width)} ${r2(f.height)} ${f.color}`;
+		if (key !== fv.key) {
+			const r = fv.rect;
+			r.setAttribute("x", String(r2(f.x)));
+			r.setAttribute("y", String(r2(f.y)));
+			r.setAttribute("width", String(r2(f.width)));
+			r.setAttribute("height", String(r2(f.height)));
+			r.setAttribute("rx", String(FRAME_RADIUS));
+			r.setAttribute("stroke", f.color);
+			r.setAttribute("fill", f.color);
+			fv.key = key;
+		}
+		this.presentClass(fv.rect, f.id, false);
+		const item = this.items.get(f.id);
+		const text = item?.node.frame?.label ?? "";
+		if (!f.label || !item || !text) {
+			if (fv.label) {
+				fv.label.remove();
+				fv.label = null;
+				fv.labelKey = "";
+			}
+			return fv.rect;
+		}
+		if (!fv.label) {
+			fv.label = this.canvas.createDiv({ cls: DOM.frameLabel });
+			fv.label.setAttr(DOM.nodeIdAttr, f.id);
+			fv.label.setAttr("aria-hidden", "true");
+		}
+		const el = fv.label;
+		const l = f.label;
+		const px = labelFont(item.font).px;
+		const labelKey = `${text}|${r2(l.x)} ${r2(l.y)} ${l.width} ${l.height}|${px}|${f.color}`;
+		if (labelKey !== fv.labelKey) {
+			el.textContent = text;
+			el.style.setProperty("transform", `translate(${r2(l.x)}px, ${r2(l.y)}px)`);
+			el.style.setProperty("width", `${l.width}px`);
+			el.style.setProperty("height", `${l.height}px`);
+			el.style.setProperty("font-size", `${px}px`);
+			el.style.setProperty("--mapdown-branch-color", f.color);
+			fv.labelKey = labelKey;
+		}
+		this.presentClass(el, f.id, false);
+		return fv.rect;
+	}
+
+	private writeBrace(b: SummaryBrace): void {
+		let bv = this.braceViews.get(b.summaryId);
+		if (!bv) {
+			const path = this.braceGroup.createSvg("path", { cls: DOM.summaryBrace });
+			const hit = this.braceGroup.createSvg("path", { cls: DOM.summaryBraceHit });
+			path.setAttr(DOM.summaryAttr, b.summaryId);
+			hit.setAttr(DOM.summaryAttr, b.summaryId);
+			bv = { path, hit, d: "" };
+			this.braceViews.set(b.summaryId, bv);
+		}
+		const d = bracePath(b);
+		if (d !== bv.d) {
+			bv.path.setAttribute("d", d);
+			bv.hit.setAttribute("d", d);
+			bv.d = d;
+		}
+		this.presentClass(bv.path, b.summaryId, false);
 	}
 
 	private setAnimating(on: boolean): void {
@@ -1634,6 +1877,11 @@ class Renderer implements MapRenderer {
 			const el = target.closest(`.${DOM.node}`);
 			const id = el?.getAttribute(DOM.nodeIdAttr);
 			if (el && id && this.canvas.contains(el) && this.items.has(id)) return { kind: "node", id };
+			// a brace is its summary, a label pill its framed node (spec 5.15)
+			const brace = target.closest(`.${DOM.summaryBraceHit}`)?.getAttribute(DOM.summaryAttr);
+			if (brace && this.canvas.contains(target) && this.items.has(brace)) return { kind: "node", id: brace };
+			const label = target.closest(`.${DOM.frameLabel}`)?.getAttribute(DOM.nodeIdAttr);
+			if (label && this.canvas.contains(target) && this.items.has(label)) return { kind: "node", id: label };
 		}
 		return { kind: "background" };
 	}
@@ -1666,6 +1914,8 @@ class Renderer implements MapRenderer {
 		if (this.inEditor(e.target)) return;
 		this.taskDown = null;
 		this.cardDown = null;
+		this.markerDown = null;
+		this.labelDown = null;
 		// presenting (spec 5.13): collapse handles toggle the presentation's folds; everything else on a
 		// node (links, cards, checkboxes) is a click on that node, and drags pan
 		if (this.present) {
@@ -1711,6 +1961,11 @@ class Renderer implements MapRenderer {
 		const target = this.targetOf(e.target);
 		const link = isElement(e.target) ? e.target.closest("a") : null;
 		this.linkDown = link && target.kind === "node" ? { pointerId: e.pointerId, href: link.getAttribute("data-href") ?? link.getAttribute("href") ?? "" } : null;
+		// a marker (spec 5.14): a click opens the palette, a drag still moves the node; read-only maps click the node
+		const onMarker = isElement(e.target) && e.target.closest(`.${DOM.nodeMarker}`) !== null;
+		this.markerDown = onMarker && target.kind === "node" && this.model?.readOnly !== true && e.button === 0 ? e.pointerId : null;
+		const onLabel = isElement(e.target) && e.target.closest(`.${DOM.frameLabel}`) !== null;
+		this.labelDown = onLabel && target.kind === "node" && this.model?.readOnly !== true && e.button === 0 ? e.pointerId : null;
 		this.lastEvent = e;
 		// no middle-click autoscroll
 		if (e.button === 1) e.preventDefault();
@@ -1842,9 +2097,24 @@ class Renderer implements MapRenderer {
 					this.events.linkClick(link.href, evt);
 					return;
 				}
+				const marker = this.markerDown;
+				this.markerDown = null;
+				if (marker !== null && evt && marker === evt.pointerId && !mods.mod && !mods.shift && this.events.markerClick) {
+					this.events.markerClick(target.id);
+					return;
+				}
 				this.events.nodeClick(target.id, mods);
 			},
-			doubleClick: (id) => this.events.nodeDoubleClick(id),
+			doubleClick: (id) => {
+				// on a frame's label pill: edit the label instead of the node (spec 5.15)
+				const label = this.labelDown;
+				const evt = this.lastEvent;
+				if (label !== null && evt && label === evt.pointerId && this.events.frameLabelDoubleClick) {
+					this.events.frameLabelDoubleClick(id);
+					return;
+				}
+				this.events.nodeDoubleClick(id);
+			},
 			contextMenu: (id, at) => this.events.contextMenu(id, clientPoint(at)),
 			panBy: (dx, dy) => {
 				this.rootEl.addClass(CLS.panning);

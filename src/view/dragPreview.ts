@@ -117,18 +117,19 @@ export function previewInput(root: LayoutInput, spec: PreviewSpec): Preview | nu
 		if (n === parent) {
 			kids.splice(at, 0, ...phantoms);
 			// the drop opens a collapsed target (its hidden children are not in the input)
-			return { id: n.id, size: n.size, collapsed: false, children: kids };
+			return { ...n, collapsed: false, children: kids };
 		}
-		return { id: n.id, size: n.size, collapsed: n.collapsed, children: kids };
+		// summary and frame marks stay (spec 5.15)
+		return { ...n, children: kids };
 	};
 	return { input: rebuild(root), parentId: parent.id, tops };
 }
 
 function clonePhantom(n: LayoutInput, depth: number, sizeAt: PreviewSpec["sizeAt"]): LayoutInput {
 	return {
+		...n,
 		id: phantomId(n.id),
 		size: sizeAt ? sizeAt(n.id, depth) : n.size,
-		collapsed: n.collapsed,
 		children: n.children.map((c) => clonePhantom(c, depth + 1, sizeAt)),
 	};
 }

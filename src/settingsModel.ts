@@ -126,6 +126,7 @@ export function applySetting(current: MapdownSettings, key: SettingKey, value: u
 		case 'syncSelection':
 		case 'showTaskProgress':
 		case 'embedMaps':
+		case 'markdownNotes':
 			if (typeof value !== 'boolean') return null;
 			next[key] = value;
 			return next;

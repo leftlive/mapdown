@@ -16,7 +16,8 @@ import type { Point } from "../core/types.ts";
 import { DOM } from "./contract.ts";
 import { isNode } from "./domSafe.ts";
 import type { MapView } from "./MapView.ts";
-import { isMultiSelection, MULTI_ACTIONS } from "./multiActions.ts";
+import { setIconFrom } from "./icons.ts";
+import { isMultiSelection, multiActionEnabled, MULTI_ACTIONS } from "./multiActions.ts";
 import { barPosition, screenRect, type Rect } from "./viewport.ts";
 
 /** Space between the bar and the selection, and between the bar and the edges of the available area. */
@@ -29,7 +30,7 @@ const SHOWN = "is-shown";
  */
 export function addMultiButtons(
 	parent: HTMLElement,
-	view: Pick<MapView, "run">,
+	view: Pick<MapView, "run" | "openMarkers">,
 	signal: AbortSignal,
 	before?: () => void,
 ): Map<string, HTMLButtonElement> {
@@ -37,16 +38,32 @@ export function addMultiButtons(
 	for (const a of MULTI_ACTIONS) {
 		const label = t(a.label);
 		const b = parent.createEl("button", { cls: "clickable-icon", attr: { [DOM.actionAttr]: a.action, "aria-label": label } });
-		setIcon(b, a.icon);
+		setIconFrom(b, a.icon);
+		if (a.icon === "smile-plus" && !b.querySelector("svg")) setIcon(b, "smile");
 		b.addEventListener("pointerdown", (e) => e.preventDefault(), { signal });
 		b.addEventListener("click", (e) => {
 			e.preventDefault();
+			// the palette goes below the bar (spec 5.14); read where it is before a menu closes
+			const below = a.opensPalette ? parent.getBoundingClientRect() : null;
 			before?.();
-			view.run(a.command);
+			if (below) view.openMarkers({ below });
+			else view.run(a.command);
 		}, { signal });
 		out.set(a.action, b);
 	}
 	return out;
+}
+
+/** Greys the buttons that cannot apply to the selection now ("summary" off unless it is adjacent siblings, spec 5.15). */
+export function enableMultiButtons(buttons: ReadonlyMap<string, HTMLButtonElement>, view: Pick<MapView, "summaryFits">): void {
+	const siblings = view.summaryFits();
+	for (const a of MULTI_ACTIONS) {
+		const b = buttons.get(a.action);
+		if (!b) continue;
+		const ok = multiActionEnabled(a, siblings);
+		b.disabled = !ok;
+		b.toggleClass("is-disabled", !ok);
+	}
 }
 
 export class MultiActionBar {
@@ -62,16 +79,18 @@ export class MultiActionBar {
 	private area: Rect | null = null;
 	private size = { width: 0, height: 0 };
 	private menuShown = false;
+	private barButtons = new Map<string, HTMLButtonElement>();
+	private menuButtons = new Map<string, HTMLButtonElement>();
 
 	constructor(parent: HTMLElement, view: MapView, floating: boolean) {
 		this.parent = parent;
 		this.view = view;
 		const signal = this.abort.signal;
 		this.bar = floating ? parent.createDiv({ cls: DOM.multiBar }) : null;
-		if (this.bar) addMultiButtons(this.bar, view, signal);
+		if (this.bar) this.barButtons = addMultiButtons(this.bar, view, signal);
 		this.menu = parent.createDiv({ cls: DOM.multiMenu });
 		this.menu.hide();
-		addMultiButtons(this.menu, view, signal, () => this.hideMenu());
+		this.menuButtons = addMultiButtons(this.menu, view, signal, () => this.hideMenu());
 	}
 
 	get isMenuOpen(): boolean {
@@ -91,6 +110,7 @@ export class MultiActionBar {
 			this.bar.removeClass(SHOWN);
 			return;
 		}
+		enableMultiButtons(this.barButtons, this.view);
 		this.schedule();
 	}
 
@@ -105,6 +125,7 @@ export class MultiActionBar {
 		const box = this.parent.getBoundingClientRect();
 		this.menuShown = true;
 		this.bar?.removeClass(SHOWN);
+		enableMultiButtons(this.menuButtons, this.view);
 		menu.show();
 		const x = Math.min(at.x - box.left + 4, box.width - menu.offsetWidth - 4);
 		const y = Math.min(at.y - box.top, box.height - menu.offsetHeight - 4);

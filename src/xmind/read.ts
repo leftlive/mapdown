@@ -2,13 +2,20 @@
 // `content.xml`) into a topic tree and writes each sheet as a Mapdown note.
 // No Obsidian imports, so the unit tests can load it.
 import JSZip from 'jszip';
+import { MARKER_PRESETS, presetOf } from '../core/markers.ts';
 import { collapsedIdsBreadthFirst, writeOutline, type OutlineSource } from '../core/outline.ts';
+import { cleanLabel, notesSuffix, planSummaries } from '../core/summary.ts';
+import type { FrameMark, SummaryMark } from '../core/types.ts';
 
 export interface TopicNode {
     text: string;
     collapsed: boolean;
     children: TopicNode[];
     blockId?: string;
+    /** 1.5: an XMind summary topic, placed after the topics it covers (spec 5.15). */
+    summary?: SummaryMark;
+    /** 1.5: a boundary around this one topic. */
+    frame?: FrameMark;
 }
 
 export interface XmindSheet {
@@ -16,7 +23,8 @@ export interface XmindSheet {
     root: TopicNode;
 }
 
-export type SkippedKind = 'summary' | 'boundary' | 'relationship' | 'callout' | 'image';
+/** 1.5: summaries are imported; boundaries only when they enclose a single topic. */
+export type SkippedKind = 'boundary' | 'relationship' | 'callout' | 'image';
 
 export interface XmindDocument {
     sheets: XmindSheet[];
@@ -39,7 +47,14 @@ export const NOTE_PREFIX = '📝 ';
 export const TASK_DONE = '✅';
 
 // The parts of a topic both file formats provide.
+/** A summary or boundary of a topic's children: indices into `attached`, both ends included. */
+interface RawRange {
+    start: number;
+    end: number;
+}
+
 interface RawTopic {
+    id: string;
     title: string;
     href: string;
     notes: string;
@@ -48,6 +63,10 @@ interface RawTopic {
     folded: boolean;
     attached: RawTopic[];
     detached: RawTopic[];
+    /** 1.5: summaries over `attached` with their topics (`children.summary`). */
+    summaries: (RawRange & { topic: RawTopic })[];
+    /** 1.5: boundaries over `attached`; null for a master or unreadable range. */
+    boundaries: ((RawRange & { title: string }) | null)[];
     skipped: Partial<Record<SkippedKind, number>>;
 }
 
@@ -84,7 +103,7 @@ export async function readXmind(
     const doc: XmindDocument = {
         sheets: [],
         topicCount: 0,
-        skipped: { summary: 0, boundary: 0, relationship: 0, callout: 0, image: 0 },
+        skipped: { boundary: 0, relationship: 0, callout: 0, image: 0 },
     };
     raw.forEach((sheet, i) => {
         if (!sheet.root) {
@@ -116,8 +135,94 @@ function convertTopic(raw: RawTopic, doc: XmindDocument): TopicNode {
     if (raw.notes) {
         node.children.push({ text: NOTE_PREFIX + raw.notes, collapsed: false, children: [] });
     }
-    raw.attached.forEach((t) => node.children.push(convertTopic(t, doc)));
+    const attached = raw.attached.map((t) => convertTopic(t, doc));
+    // 1.5: a boundary around one topic is its frame; around several (or the whole map) it is skipped
+    for (const b of raw.boundaries) {
+        const target = b && b.start === b.end ? attached[b.start] : undefined;
+        if (!target || target.frame) {
+            doc.skipped.boundary++;
+            continue;
+        }
+        const label = cleanLabel(b?.title ?? '');
+        target.frame = label ? { label } : {};
+    }
+    // 1.5: a summary follows the last topic it covers (spec 5.15)
+    const summaries = raw.summaries
+        .filter((r) => r.start >= 0 && r.start <= r.end && r.end < attached.length)
+        .sort((a, b) => a.end - b.end || b.start - a.start);
+    let next = 0;
+    attached.forEach((child, i) => {
+        node.children.push(child);
+        for (; next < summaries.length && summaries[next].end === i; next++) {
+            const r = summaries[next];
+            const topic = convertTopic(r.topic, doc);
+            topic.summary = summaryMark(node.children, r.end - r.start + 1);
+            node.children.push(topic);
+        }
+    });
     return node;
+}
+
+/** `%%summary%%` when the default range of a summary placed after `siblings` covers exactly `count`, else `:count` (1–99). */
+function summaryMark(siblings: readonly TopicNode[], count: number): SummaryMark {
+    const marks = [...siblings.map((c) => c.summary), {}];
+    const cover = planSummaries(marks).covers[siblings.length];
+    const n = Math.min(99, count);
+    return cover && cover.last - cover.first + 1 === n ? {} : { count: n };
+}
+
+/** `(s,e)` with s <= e; null otherwise (a master boundary says `master`). */
+function rangeOf(value: unknown): RawRange | null {
+    const m = /^\(\s*(\d+)\s*,\s*(\d+)\s*\)$/.exec(typeof value === 'string' ? value.trim() : '');
+    if (!m) return null;
+    const start = Number(m[1]);
+    const end = Number(m[2]);
+    return start <= end ? { start, end } : null;
+}
+
+/** Summaries whose topic is found; the others are dropped without a count. */
+function summariesOf(items: { range: unknown; topicId: string }[], topics: RawTopic[]): RawTopic['summaries'] {
+    const byId = new Map(topics.map((t) => [t.id, t]));
+    const out: RawTopic['summaries'] = [];
+    for (const item of items) {
+        const range = rangeOf(item.range);
+        const topic = byId.get(item.topicId);
+        if (range && topic) out.push({ ...range, topic });
+    }
+    return out;
+}
+
+/** A boundary's title: none when XMind marks it unedited (its default "Boundary" text). */
+function boundaryOf(range: unknown, title: string, unedited: boolean): RawTopic['boundaries'][number] {
+    const r = rangeOf(range);
+    return r ? { ...r, title: unedited ? '' : title } : null;
+}
+
+/**
+ * Preset markers (other than priorities) with a confirmed XMind marker id: the
+ * group-name pattern is the one `priority-n`, `task-done` and `flag-red` already
+ * use, the names come from the XMind SDK's marker list. Colour circles, 💡, 🔥 and
+ * 👍 have no confirmed counterpart and stay text.
+ */
+export const XMIND_MARKER_IDS: ReadonlyMap<string, string> = new Map([
+    ['\u{1F6A9}', 'flag-red'],
+    ['⭐', 'star-yellow'],
+    ['❓', 'symbol-question'],
+    ['❗', 'symbol-exclam'],
+    ['⚠\uFE0F', 'symbol-attention'],
+]);
+const EMOJI_OF_ID = new Map([...XMIND_MARKER_IDS].map(([emoji, id]) => [id, emoji]));
+
+/** The marker run for imported ids: `n️⃣` for priority-n, then the mapped symbols, in preset order. */
+function markerRun(ids: readonly string[]): string[] {
+    const found: string[] = [];
+    const priority = ids.map((m) => /^priority-([1-9])$/.exec(m)).find(Boolean);
+    const keycap = priority ? MARKER_PRESETS.find((p) => p.group === 'priority' && p.arg === Number(priority[1])) : undefined;
+    if (keycap) found.push(keycap.emoji);
+    const emojis = ids.map((id) => EMOJI_OF_ID.get(id)).filter((e): e is string => !!e);
+    const rank = (e: string) => MARKER_PRESETS.findIndex((p) => p === presetOf(e));
+    for (const e of [...new Set(emojis)].sort((a, b) => rank(a) - rank(b))) found.push(e);
+    return found;
 }
 
 function topicText(raw: RawTopic) {
@@ -134,10 +239,8 @@ function topicText(raw: RawTopic) {
     } else if (raw.markers.some((m) => m.startsWith('task-'))) {
         prefix.push('[ ]');
     }
-    const priority = raw.markers.map((m) => /^priority-(\d+)$/.exec(m)).find(Boolean);
-    if (priority) {
-        prefix.push(`(P${priority[1]})`);
-    }
+    // 1.4: priority and the confirmed symbol markers come back as emoji, after the checkbox
+    prefix.push(...markerRun(raw.markers));
     const labels = raw.labels.map((l) => l.trim()).filter(Boolean).map((l) => `\`${l.replace(/`/g, '')}\``);
     return [...prefix, title, ...labels].filter(Boolean).join(' ');
 }
@@ -174,7 +277,9 @@ function parseZenContent(text: string): RawSheet[] {
 function zenTopic(item: unknown): RawTopic {
     const topic = obj(item);
     const children = obj(topic.children);
+    const summaryTopics = list(children.summary).map(zenTopic);
     return {
+        id: stringOf(topic.id),
         title: normalizeText(topic.title),
         href: typeof topic.href === 'string' ? topic.href : '',
         notes: normalizeText(obj(obj(topic.notes).plain).content),
@@ -183,9 +288,9 @@ function zenTopic(item: unknown): RawTopic {
         folded: topic.branch === 'folded',
         attached: list(children.attached).map(zenTopic),
         detached: list(children.detached).map(zenTopic),
+        summaries: summariesOf(list(topic.summaries).map((s) => ({ range: obj(s).range, topicId: stringOf(obj(s).topicId) })), summaryTopics),
+        boundaries: list(topic.boundaries).map((b) => boundaryOf(obj(b).range, normalizeText(obj(b).title), obj(b).titleUnedited === true)),
         skipped: {
-            summary: list(topic.summaries).length,
-            boundary: list(topic.boundaries).length,
             callout: list(children.callout).length,
             image: topic.image ? 1 : 0,
         },
@@ -228,7 +333,9 @@ function legacyTopic(topic: Element): RawTopic {
         return el ? elements(el, item) : [];
     };
     const notes = elements(topic, 'notes')[0];
+    const summaryTopics = childTopics('summary').map(legacyTopic);
     return {
+        id: topic.getAttribute('id') || '',
         title: normalizeText(elements(topic, 'title')[0]?.textContent),
         href: topic.getAttribute('xlink:href') || '',
         notes: normalizeText(notes ? elements(notes, 'plain')[0]?.textContent : ''),
@@ -237,9 +344,9 @@ function legacyTopic(topic: Element): RawTopic {
         folded: topic.getAttribute('branch') === 'folded',
         attached: childTopics('attached').map(legacyTopic),
         detached: childTopics('detached').map(legacyTopic),
+        summaries: summariesOf(grouped('summaries', 'summary').map((s) => ({ range: s.getAttribute('range'), topicId: s.getAttribute('topic-id') || '' })), summaryTopics),
+        boundaries: grouped('boundaries', 'boundary').map((b) => boundaryOf(b.getAttribute('range'), normalizeText(elements(b, 'title')[0]?.textContent), false)),
         skipped: {
-            summary: grouped('summaries', 'summary').length,
-            boundary: grouped('boundaries', 'boundary').length,
             callout: childTopics('callout').length,
             image: elements(topic, 'img').length,
         },
@@ -250,6 +357,7 @@ const topicSource: OutlineSource<TopicNode> = {
     children: (n) => n.children,
     text: (n) => n.text,
     blockId: (n) => n.blockId || '',
+    notes: (n) => notesSuffix(n),
 };
 
 // A fresh block id: letters, digits and `-` only (format contract 4.8).

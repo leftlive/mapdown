@@ -64,6 +64,72 @@
 	stroke-width: 2px;
 }
 
+/* ---- summaries and frames (spec 5.15) --------------------------------
+   One SVG behind the edges (DOM.decor) holds the frames and the braces;
+   the label pills are elements in the canvas. Its size and position follow
+   .mapdown-edges. Theme colours only, so light and dark both work. */
+.mapdown-decor {
+	position: absolute;
+	left: 0;
+	top: 0;
+	overflow: visible;
+	pointer-events: none;
+}
+
+.mapdown-frame {
+	stroke-width: 1.5px;
+	stroke-dasharray: 5 4;
+	fill-opacity: 0.06;
+}
+
+.mapdown-decor .mapdown-summary-brace {
+	fill: none;
+	stroke: var(--text-muted);
+	stroke-width: 1.6px;
+	stroke-linecap: round;
+	stroke-linejoin: round;
+}
+
+/* the click target of a brace: wider than the line, never drawn */
+.mapdown-decor .mapdown-summary-brace-hit {
+	fill: none;
+	stroke: transparent;
+	stroke-width: 12px;
+	pointer-events: stroke;
+	cursor: pointer;
+}
+
+/* edges inside a summary's subtree: neutral, not the branch colour (beats the stroke attribute) */
+.mapdown-edges path.is-muted-edge {
+	stroke: var(--text-muted);
+}
+
+/* size and position come from the layout (src/view/measure.ts labelSize): padding 4px 8px, line height 1 */
+.mapdown-frame-label {
+	position: absolute;
+	left: 0;
+	top: 0;
+	box-sizing: border-box;
+	padding: 4px 8px;
+	border-radius: 999px;
+	background: var(--mapdown-branch-color, var(--text-muted));
+	color: var(--background-primary);
+	font-weight: 500;
+	line-height: 1;
+	white-space: nowrap;
+	overflow: hidden;
+	text-align: center;
+	user-select: none;
+	-webkit-user-select: none;
+	cursor: default;
+}
+
+.mapdown-view .mapdown-frame.is-present-dim,
+.mapdown-view .mapdown-summary-brace.is-present-dim,
+.mapdown-view .mapdown-frame-label.is-present-dim {
+	opacity: 0.15;
+}
+
 /* ---- nodes ------------------------------------------------------------
    The node element is the box. Its padding comes from --mapdown-pad-x/-y on
    the level classes and must match NODE_LEVELS in src/view/measure.ts, like
@@ -246,7 +312,7 @@
 
 /* display formulas: MathJax's own 1em block margin leaves a gap inside a node; keep a small one
    so a formula after text still sits on its own line */
-.mapdown-node .mapdown-node-content mjx-container[jax][display="true"] {
+.mapdown-node .mapdown-node-content .MathJax[display="true"] {
 	margin: 0.2em 0;
 }
 
@@ -260,11 +326,19 @@
 	margin-bottom: 0;
 }
 
-/* callouts in nodes (spec 5.6): always expanded; the title does not fold them */
-.mapdown-node-content .callout.is-collapsed > .callout-content {
-	display: block !important;
+/* quotes in nodes (spec 5.6): a bar, 0.6em gap and the theme's quote colours, like the reading view;
+   every nesting level has its own bar. Callouts are divs, not blockquotes. */
+.mapdown-node-content blockquote {
+	margin: 0;
+	padding: 0 0 0 0.6em;
+	border: 0;
+	border-inline-start: var(--blockquote-border-thickness, 2px) solid var(--blockquote-border-color, var(--interactive-accent));
+	color: var(--blockquote-color, inherit);
+	font-style: var(--blockquote-font-style, inherit);
+	background-color: var(--blockquote-background-color, transparent);
 }
 
+/* callouts in nodes (spec 5.6): always expanded (the renderer drops is-collapsed); the title does not fold them */
 .mapdown-node-content .callout > .callout-title {
 	pointer-events: none;
 }
@@ -596,6 +670,208 @@
 
 .mapdown-task-progress.is-complete {
 	color: var(--text-success, var(--color-green));
+}
+
+/* ---- node markers (spec 5.14) --------------------------------------------
+   Emoji before the text, after a task checkbox. Sizes are in em of the node's
+   font (the run's own font is 1.15 times that, hence the divisions); keep them
+   in sync with MARKER_SCALE, MARKER_GAP_EM and MARKER_AFTER_EM in
+   src/view/measure.ts. One line tall, like the text's first line (1.45). */
+
+.mapdown-node .mapdown-node-markers {
+	display: inline-flex;
+	flex: none;
+	align-self: flex-start;
+	align-items: center;
+	gap: calc(0.25em / 1.15);
+	height: calc(1.45em / 1.15);
+	margin-inline-end: calc(0.4em / 1.15);
+	font-size: 1.15em;
+	font-weight: 400;
+	font-style: normal;
+	line-height: 1;
+	white-space: nowrap;
+	color: var(--text-normal);
+	text-decoration: none;
+}
+
+.mapdown-node .mapdown-node-markers.is-alone {
+	margin-inline-end: 0;
+}
+
+.mapdown-node .mapdown-node-marker {
+	cursor: pointer;
+}
+
+.mapdown-node .mapdown-node-markers.is-readonly .mapdown-node-marker {
+	cursor: default;
+}
+
+/* the palette: header (chips, Clear), tabs, one fixed-height grid, hint. Buttons are reset
+   with the palette in the selector so a theme's button look (grey fill, shadow) does not leak in. */
+.mapdown-marker-palette {
+	--mapdown-marker-cols: 8;
+	--mapdown-marker-rows: 3;
+	--mapdown-marker-cell: 34px;
+	position: absolute;
+	z-index: 4;
+	display: flex;
+	flex-direction: column;
+	box-sizing: border-box;
+	width: calc(var(--mapdown-marker-cols) * var(--mapdown-marker-cell) + (var(--mapdown-marker-cols) - 1) * 2px + 18px);
+	max-width: calc(100% - 16px);
+	overflow: hidden;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 12px;
+	background: var(--background-primary);
+	color: var(--text-normal);
+	box-shadow: var(--shadow-s);
+}
+
+.mapdown-marker-palette button {
+	appearance: none;
+	box-sizing: border-box;
+	margin: 0;
+	border: 0;
+	background: transparent;
+	box-shadow: none;
+	color: var(--text-normal);
+	font-family: inherit;
+	cursor: pointer;
+}
+
+.mapdown-marker-palette .mapdown-marker-head {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	min-height: 40px;
+	padding: 8px 10px;
+	border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.mapdown-marker-palette .mapdown-marker-added,
+.mapdown-marker-palette .mapdown-marker-none {
+	flex: none;
+	font-size: 12px;
+	color: var(--text-muted);
+}
+
+.mapdown-marker-palette .mapdown-marker-none {
+	color: var(--text-faint);
+}
+
+.mapdown-marker-palette .mapdown-marker-chips {
+	display: flex;
+	flex: 1;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 4px;
+	min-width: 0;
+}
+
+.mapdown-marker-palette .mapdown-marker-chip {
+	height: auto;
+	padding: 2px 4px;
+	border-radius: 6px;
+	background: var(--background-secondary);
+	font-size: 17px;
+	line-height: 1.2;
+}
+
+.mapdown-marker-palette .mapdown-marker-chip:hover {
+	background: var(--background-modifier-hover);
+}
+
+.mapdown-marker-palette .mapdown-marker-clear {
+	flex: none;
+	height: auto;
+	padding: 2px 4px;
+	font-size: 12px;
+	color: var(--text-muted);
+}
+
+.mapdown-marker-palette .mapdown-marker-clear:hover:not(:disabled) {
+	color: var(--text-normal);
+}
+
+.mapdown-marker-palette .mapdown-marker-clear:disabled {
+	color: var(--text-faint);
+	opacity: 0.6;
+	cursor: default;
+}
+
+.mapdown-marker-palette .mapdown-marker-tabs {
+	display: flex;
+	gap: 4px;
+	padding: 8px 10px 0;
+}
+
+.mapdown-marker-palette .mapdown-marker-tab {
+	height: auto;
+	padding: 4px 10px;
+	border-radius: 999px;
+	font-size: 12px;
+	line-height: 1.4;
+	color: var(--text-muted);
+}
+
+.mapdown-marker-palette .mapdown-marker-tab:hover:not(.is-active) {
+	background: var(--background-modifier-hover);
+}
+
+.mapdown-marker-palette .mapdown-marker-tab.is-active {
+	background: var(--text-normal);
+	color: var(--background-primary);
+}
+
+.mapdown-marker-palette .mapdown-marker-grid {
+	display: grid;
+	grid-template-columns: repeat(var(--mapdown-marker-cols), 1fr);
+	grid-auto-rows: var(--mapdown-marker-cell);
+	align-content: start;
+	gap: 2px;
+	box-sizing: border-box;
+	min-height: calc(var(--mapdown-marker-rows) * var(--mapdown-marker-cell) + (var(--mapdown-marker-rows) - 1) * 2px + 16px);
+	padding: 8px;
+}
+
+.mapdown-marker-palette .mapdown-marker-button {
+	display: flex;
+	justify-content: center;
+	align-items: center;
+	width: auto;
+	height: var(--mapdown-marker-cell);
+	padding: 0;
+	border-radius: 8px;
+	font-size: 19px;
+	line-height: 1;
+}
+
+.mapdown-marker-palette .mapdown-marker-button:hover {
+	background: var(--background-modifier-hover);
+}
+
+.mapdown-marker-palette .mapdown-marker-button.is-active {
+	background: color-mix(in srgb, var(--interactive-accent) 16%, transparent);
+	box-shadow: inset 0 0 0 1.5px var(--interactive-accent);
+}
+
+.mapdown-marker-palette .mapdown-marker-hint {
+	padding: 0 10px 8px;
+	font-size: 12px;
+	color: var(--text-muted);
+}
+
+.is-mobile .mapdown-marker-palette {
+	--mapdown-marker-cell: 40px;
+}
+
+.is-mobile .mapdown-marker-palette .mapdown-marker-button {
+	font-size: 22px;
+}
+
+.mapdown-view.is-presenting .mapdown-marker-palette {
+	display: none;
 }
 
 /* ---- inline editor ---------------------------------------------------- */
@@ -1106,6 +1382,10 @@
 	pointer-events: none;
 }
 
+.mapdown-mobile-toolbar::-webkit-scrollbar {
+	display: none;
+}
+
 .mapdown-mobile-toolbar {
 	position: absolute;
 	left: var(--size-4-2);
@@ -1116,7 +1396,6 @@
 	flex-wrap: nowrap;
 	justify-content: safe center;
 	overflow-x: auto;
-	scrollbar-width: none;
 	gap: var(--size-2-1);
 	padding: var(--size-2-1);
 	border: 1px solid var(--background-modifier-border);
@@ -1138,6 +1417,13 @@
 
 .mapdown-mobile-toolbar .clickable-icon.is-disabled {
 	opacity: 0.4;
+}
+
+/* the summary button off a selection that cannot take one (spec 5.15) */
+.mapdown-multi-bar .clickable-icon.is-disabled,
+.mapdown-multi-menu .clickable-icon.is-disabled {
+	opacity: 0.35;
+	cursor: default;
 }
 
 /* the overview and the map toolbar stay above the node toolbar */
@@ -1739,4 +2025,178 @@
 	right: auto;
 	margin-top: 0;
 	margin-left: -8px;
+}
+
+/* Summary and frame comments as tags in the Markdown views of map notes (spec 5.16) */
+.mapdown-note-tags {
+	display: inline-flex;
+	gap: 4px;
+	vertical-align: baseline;
+}
+
+.mapdown-note-tag {
+	display: inline-block;
+	box-sizing: border-box;
+	padding: 0 6px;
+	border: 1px solid transparent;
+	border-radius: 999px;
+	font-size: 0.8em;
+	line-height: 1.5;
+	white-space: nowrap;
+	cursor: default;
+	background: transparent;
+	border-color: var(--interactive-accent);
+	border-style: dashed;
+	color: var(--interactive-accent);
+}
+
+.markdown-source-view.mod-cm6 .mapdown-note-tags .mapdown-note-tag {
+	cursor: pointer;
+}
+
+.markdown-source-view.mod-cm6 .cm-line.mapdown-note-line {
+	line-height: 1.2;
+	padding-top: 0;
+	padding-bottom: 0;
+}
+
+.markdown-preview-view .mapdown-note-tags {
+	margin-left: 6px;
+	pointer-events: none;
+}
+
+/* Nothing to show: a heading's comment line, a block id alone on its line, the empty paragraph in the reading view */
+.markdown-source-view.mod-cm6 .cm-line.mapdown-note-hidden {
+	height: 0;
+	min-height: 0;
+	line-height: 0;
+	padding: 0;
+	overflow: hidden;
+}
+
+.markdown-preview-view .mapdown-note-hidden {
+	display: none;
+}
+
+/* Properties of a map note (spec 5.16 item 4): the two plugin rows give way to one line */
+.mapdown-props-hidden .metadata-property[data-property-key="mindmap-plugin"],
+.mapdown-props-hidden .metadata-property[data-property-key="mindmark-state"] {
+	display: none;
+}
+
+.mapdown-note-info {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	padding: 2px 0;
+	font-size: var(--font-smaller);
+	color: var(--text-muted);
+	cursor: pointer;
+}
+
+.mapdown-note-info:hover {
+	color: var(--text-normal);
+}
+
+.mapdown-note-info .svg-icon {
+	width: 14px;
+	height: 14px;
+}
+
+/* Range lines (spec 5.16 item 3): summary 1.5px --text-faint, 6px left of the list marker, hooked 6px to the right
+   at its bottom; frame 1.5px dashed --interactive-accent, 10px left, hooked at both ends (the hooks sit at the top
+   and bottom of the line box, the vertical runs through the whole box, padding included). Theme colours, so light
+   and dark follow the theme. `--mapdown-range-indent` is the step per list level in the live preview. */
+body {
+	--mapdown-range-summary: var(--text-faint);
+	--mapdown-range-frame: var(--interactive-accent);
+	--mapdown-range-indent: var(--list-indent, 2.25em);
+}
+
+/* live preview: one element per covered line draws every range passing through it (inline style from rangeStyle) */
+.markdown-source-view.mod-cm6.is-live-preview .cm-line.mapdown-range-line {
+	position: relative;
+}
+
+.markdown-source-view.mod-cm6.is-live-preview .cm-line.mapdown-range-line .mapdown-range-marks {
+	display: inline;
+	position: static;
+	margin: 0;
+	padding: 0;
+}
+
+/* our own element, not the line's ::after: themes style heading lines' pseudo-elements */
+.markdown-source-view.mod-cm6.is-live-preview .cm-line.mapdown-range-line .mapdown-range-draw {
+	display: block;
+	position: absolute;
+	height: auto;
+	margin: 0;
+	padding: 0;
+	border: 0;
+	transform: none;
+	top: 0;
+	bottom: 0;
+	left: -40px;
+	width: calc(var(--mapdown-range-indent) * var(--mapdown-range-levels, 0) + 48px);
+	background-image: var(--mapdown-range-img);
+	background-position: var(--mapdown-range-pos);
+	background-size: var(--mapdown-range-size);
+	background-repeat: no-repeat;
+	pointer-events: none;
+}
+
+/* reading view: covered list items (the sublist is inside the li) and the sections of heading ranges */
+.markdown-preview-view li.mapdown-range-summary,
+.markdown-preview-view li.mapdown-range-frame,
+.markdown-preview-view .mapdown-range-block-summary,
+.markdown-preview-view .mapdown-range-block-frame {
+	position: relative;
+}
+
+.markdown-preview-view li.mapdown-range-summary::before,
+.markdown-preview-view .mapdown-range-block-summary::before {
+	content: "";
+	position: absolute;
+	top: 0;
+	bottom: 0;
+	left: calc(-1 * var(--mapdown-range-li-marker, 1.1em) - 6px);
+	width: 6px;
+	border-left: 1.5px solid var(--mapdown-range-summary);
+	pointer-events: none;
+}
+
+.markdown-preview-view li.mapdown-range-summary-last::before,
+.markdown-preview-view .mapdown-range-block-summary.mapdown-range-summary-last::before {
+	border-bottom: 1.5px solid var(--mapdown-range-summary);
+}
+
+.markdown-preview-view li.mapdown-range-frame::after,
+.markdown-preview-view .mapdown-range-block-frame::after {
+	content: "";
+	position: absolute;
+	top: 0;
+	bottom: 0;
+	left: calc(-1 * var(--mapdown-range-li-marker, 1.1em) - 10px);
+	width: 6px;
+	border-left: 1.5px dashed var(--mapdown-range-frame);
+	pointer-events: none;
+}
+
+.markdown-preview-view li.mapdown-range-frame-first::after,
+.markdown-preview-view .mapdown-range-block-frame.mapdown-range-frame-first::after {
+	border-top: 1.5px solid var(--mapdown-range-frame);
+}
+
+.markdown-preview-view li.mapdown-range-frame-last::after,
+.markdown-preview-view .mapdown-range-block-frame.mapdown-range-frame-last::after {
+	border-bottom: 1.5px solid var(--mapdown-range-frame);
+}
+
+/* sections have no list marker: the line stands just left of the text column */
+.markdown-preview-view .mapdown-range-block-summary::before {
+	left: -6px;
+}
+
+.markdown-preview-view .mapdown-range-block-frame::after {
+	left: -10px;
 }

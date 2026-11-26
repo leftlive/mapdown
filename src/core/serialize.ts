@@ -4,8 +4,9 @@
 // a document: a heading level offset, or a list indent and marker that follow
 // the neighbouring siblings.
 
-import { clampHeadLevel, formulaLines, hasMultilineFormula, writeMapOutline, writeOutline, type LineEnding, type OutlineSource } from './outline.ts';
-import type { MapNode } from './types.ts';
+import { clampHeadLevel, formulaLines, hasRealLines, isQuoteLines, writeMapOutline, writeOutline, type LineEnding, type OutlineSource } from './outline.ts';
+import { notesSuffix } from './summary.ts';
+import type { FrameMark, MapNode, SummaryMark } from './types.ts';
 
 /** The line kinds a node's text can be written into. */
 export type TextKind = 'heading' | 'list' | 'paragraph';
@@ -15,6 +16,10 @@ export interface NewNode {
 	text: string;
 	blockId: string | null;
 	children: NewNode[];
+	/** Written as `%%summary%%` / `%%summary:N%%` (contract 4.11). */
+	summary?: SummaryMark;
+	/** Written as `%%frame%%` / `%%frame: label%%`. */
+	frame?: FrameMark;
 }
 
 /**
@@ -67,24 +72,27 @@ export function isBlockText(text: string): boolean {
 export function encodeText(text: string, kind: TextKind, cont?: { eol: string; pad: string }): string {
 	const t = text.replace(/\r/g, '').trim();
 	// A closed multi-line `$$ ... $$` keeps real line breaks in list items and paragraphs (6.3).
-	const s = cont && kind !== 'heading' && hasMultilineFormula(t) ? formulaLines(t, cont.eol, cont.pad) : t.replace(/\n/g, '<br>');
-	return kind === 'list' && s.startsWith('>') ? `\\${s}` : s;
+	const s = cont && kind !== 'heading' && hasRealLines(t) ? formulaLines(t, cont.eol, cont.pad) : t.replace(/\n/g, '<br>');
+	return kind === 'list' && s.startsWith('>') && !isQuoteLines(t) ? `\\${s}` : s;
 }
 
 export function blockIdSuffix(blockId: string | null): string {
 	return blockId ? ` ^${blockId}` : '';
 }
 
-/** `## text ^id`; an empty heading is just the hashes. */
-export function headingLine(level: number, text: string, blockId: string | null): string {
+/**
+ * `## text ^id`; an empty heading is just the hashes. `notes` (summary and
+ * frame comments with their leading space, contract 4.11) go before the id.
+ */
+export function headingLine(level: number, text: string, blockId: string | null, notes = ''): string {
 	const enc = encodeText(text, 'heading');
-	return '#'.repeat(level) + (enc ? ` ${enc}` : '') + blockIdSuffix(blockId);
+	return '#'.repeat(level) + (enc ? ` ${enc}` : '') + notes + blockIdSuffix(blockId);
 }
 
-/** `<indent><marker> text ^id`; an empty item is just the marker. */
-export function listLine(indent: string, marker: string, text: string, blockId: string | null, eol = '\n'): string {
+/** `<indent><marker> text ^id`; an empty item is just the marker. `notes` as for headingLine. */
+export function listLine(indent: string, marker: string, text: string, blockId: string | null, eol = '\n', notes = ''): string {
 	const enc = encodeText(text, 'list', { eol, pad: indent + ' '.repeat(marker.length + 1) });
-	return indent + marker + (enc ? ` ${enc}` : '') + blockIdSuffix(blockId);
+	return indent + marker + (enc ? ` ${enc}` : '') + notes + blockIdSuffix(blockId);
 }
 
 /** The marker for the item after one with `marker`: `3.` after `2.`, else the same bullet. */
@@ -106,6 +114,7 @@ export function writeSubtree(node: NewNode, form: Form, ctx: WriteContext): Writ
 		children: (n) => n.children,
 		text: (n) => n.text,
 		blockId: (n) => n.blockId ?? '',
+		notes: (n) => notesSuffix(n),
 		written: (n, range) => starts.push({ line: range.start, node: n }),
 	};
 	const eol = ctx.eol;
@@ -126,7 +135,7 @@ export function writeSubtree(node: NewNode, form: Form, ctx: WriteContext): Writ
 		if (form.marker !== '-' && !isBlockText(node.text)) {
 			lines[0] = form.marker + first.slice(1);
 			// A multi-line formula's lines sit under the item's content column, which a longer marker moves.
-			if (hasMultilineFormula(node.text.trim())) {
+			if (hasRealLines(node.text.trim())) {
 				const extra = ' '.repeat(form.marker.length - 1);
 				const n = node.text.trim().split('\n').length;
 				for (let i = 1; i < n; i++) if ((lines[i] ?? '') !== '') lines[i] = extra + lines[i];

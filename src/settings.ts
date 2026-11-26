@@ -40,6 +40,8 @@ export interface MapdownSettings {
 	embedHeight: number;
 	/** 1.2: `ask` (the system "Save as" dialog) or `note` (next to the note). */
 	exportLocation: ExportLocation;
+	/** 1.5: summary and frame comments show as tags in the Markdown views of map notes (spec 5.16). */
+	markdownNotes: boolean;
 }
 
 export const DEFAULT_SETTINGS: Readonly<MapdownSettings> = {
@@ -62,6 +64,7 @@ export const DEFAULT_SETTINGS: Readonly<MapdownSettings> = {
 	embedMaps: true,
 	embedHeight: 400,
 	exportLocation: 'ask',
+	markdownNotes: true,
 };
 
 export const CANVAS_SIZES = [4000, 6000, 8000, 10000, 12000, 16000, 20000, 30000, 36000] as const;
@@ -128,6 +131,7 @@ export function normalizeSettings(raw: unknown): MapdownSettings {
 		embedMaps: bool(r.embedMaps, d.embedMaps),
 		embedHeight: num(r.embedHeight, d.embedHeight, 150, 1200),
 		exportLocation: oneOf(r.exportLocation, EXPORT_LOCATIONS, d.exportLocation),
+		markdownNotes: bool(r.markdownNotes, d.markdownNotes),
 	};
 	if (Array.isArray(r.strokeArray) && r.strokeArray.every((c) => typeof c === 'string')) {
 		out.strokeArray = [...r.strokeArray];

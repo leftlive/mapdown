@@ -3,7 +3,7 @@
 // scale, and the SVG string drawn straight from a layout result. No DOM and no
 // Obsidian here; the exporter (exporter.ts) supplies measuring, images and theme.
 
-import { edgePath, layout, type LayoutEdge, type LayoutInput, type LayoutResult, type NodePlacement } from "../core/layout.ts";
+import { FRAME_RADIUS, bracePath, edgePath, layout, type FrameBox, type LayoutEdge, type LayoutInput, type LayoutResult, type NodePlacement, type SummaryBrace } from "../core/layout.ts";
 import { findEmbeds } from "../core/mapCard.ts";
 import type { LayoutDirection, NodeKind, Size } from "../core/types.ts";
 import type { BranchStyle } from "../settings.ts";
@@ -527,6 +527,8 @@ export interface ExportTheme {
 	/** Progress label (`--text-muted`), and its colour when all tasks are done (`--text-success`); fall back to `faint` and `accent`. */
 	muted?: string;
 	success?: string;
+	/** Quote look (`--blockquote-*`, spec 5.6): bar width and colour, text colour, italics, background (null when none). */
+	quote?: { thickness: number; border: string; color: string; italic: boolean; background: string | null };
 }
 
 /** Something drawn inside a node, relative to the node's content box. */
@@ -553,6 +555,12 @@ export interface SceneNode {
 	radius?: number;
 	/** A task's checkbox (spec 5.9): `size` px, the text starts `lead` px further right, `cy` is the first line's middle (content box). */
 	task?: { done: boolean; size: number; lead: number; cy: number } | null;
+	/** Where the text starts in the content box (after the checkbox and the markers); the checkbox's `lead` when absent. */
+	lead?: number;
+	/** Markers before the text (spec 5.14): each emoji at `x` in the content box, at `fontPx` and weight 400, centred on the first line's middle `cy`. */
+	markers?: { fontPx: number; cy: number; items: { text: string; x: number }[] } | null;
+	/** A quote's bars (spec 5.6): `levels` bars, the first at the content box's left edge, `inset` = bars plus gaps (already in `lead`), `height` the text's height. */
+	quote?: { levels: number; inset: number; height: number; width: number } | null;
 	/** "done/total", right-aligned in the content box on the first line, at `fontPx`. */
 	progress?: { label: string; complete: boolean; fontPx: number; cy: number } | null;
 }
@@ -565,6 +573,17 @@ export interface Scene {
 	theme: ExportTheme;
 	/** Branch colour style (spec 5.12); absent means `line`. */
 	branchStyle?: BranchStyle;
+	/** Summary braces (spec 5.15), drawn in `theme.muted`. */
+	braces?: readonly SummaryBrace[];
+	/** Frames behind everything (outer first) and their label pills, drawn as on screen (spec 5.15). */
+	frames?: readonly SceneFrame[];
+}
+
+/** A frame and, when it has one, its label text at `fontPx` (bold 500). */
+export interface SceneFrame {
+	box: FrameBox;
+	label: string;
+	fontPx: number;
 }
 
 /** Fallback padding and the border; per-node padding on SceneNode wins (measure.ts NODE_LEVELS). */
@@ -789,10 +808,31 @@ function nodeSvg(node: SceneNode, scene: Scene, m: ContentMetrics, index: number
 	const ox = p.x + m.border + (node.padX ?? m.padX);
 	const oy = p.y + m.border + (node.padY ?? m.padY);
 	const weight = node.weight;
-	out.push(`<g font-size="${node.fontPx}" font-weight="${weight}" fill="${escapeXml(t.text)}">`);
+	const q = node.quote;
+	const qt = t.quote;
+	if (q && qt) {
+		// the background fills the whole quote box, the bars run along its full height (one per level)
+		if (qt.background) {
+			out.push(`<rect x="${r2(ox)}" y="${r2(oy)}" width="${r2(q.inset + q.width)}" height="${r2(q.height)}" fill="${escapeXml(qt.background)}"/>`);
+		}
+		const step = q.inset / q.levels;
+		for (let i = 0; i < q.levels; i++) {
+			out.push(`<rect class="mapdown-quote-bar" x="${r2(ox + i * step)}" y="${r2(oy)}" width="${r2(qt.thickness)}" height="${r2(q.height)}" fill="${escapeXml(qt.border)}"/>`);
+		}
+	}
+	out.push(`<g font-size="${node.fontPx}" font-weight="${weight}" fill="${escapeXml(q && qt ? qt.color : t.text)}">`);
 	const task = node.task;
-	for (const item of node.content) out.push(contentSvg(item, ox + (task?.lead ?? 0), oy, node, t, m, scale));
+	const lead = node.lead ?? task?.lead ?? 0;
+	for (const item of node.content) out.push(contentSvg(item, ox + lead, oy, node, t, m, scale));
 	if (task) out.push(checkboxSvg(ox, oy + task.cy - task.size / 2, task.size, task.done, t));
+	const mk = node.markers;
+	if (mk) {
+		// never bold, struck through or faded with the text (spec 5.14)
+		const y = r2(baselineY(oy + mk.cy, mk.fontPx, m.text, scale));
+		for (const it of mk.items) {
+			out.push(`<text class="mapdown-marker" x="${r2(ox + it.x)}" y="${y}" font-size="${r2(mk.fontPx)}" font-weight="400">${xmlText(it.text)}</text>`);
+		}
+	}
 	const pr = node.progress;
 	if (pr) {
 		const color = pr.complete ? (t.success ?? t.accent) : (t.muted ?? t.faint);
@@ -854,15 +894,35 @@ export function buildSvg(scene: Scene, metrics: ContentMetrics, pixelScale = 1):
 	const out: string[] = [
 		`<svg xmlns="http://www.w3.org/2000/svg" width="${size.width}" height="${size.height}" viewBox="${b.x} ${b.y} ${b.width} ${b.height}" font-family="${escapeXml(t.fontFamily)}">`,
 		`<rect x="${b.x}" y="${b.y}" width="${b.width}" height="${b.height}" fill="${escapeXml(t.background)}"/>`,
-		'<g fill="none" stroke-linecap="round">',
 	];
+	const muted = escapeXml(t.muted ?? t.faint);
+	// frames: dashed, a 6% wash of the branch colour, behind edges and nodes (styles.css .mapdown-frame)
+	for (const { box: f } of scene.frames ?? []) {
+		const c = escapeXml(f.color);
+		out.push(
+			`<rect class="mapdown-frame" x="${r2(f.x)}" y="${r2(f.y)}" width="${r2(f.width)}" height="${r2(f.height)}" rx="${FRAME_RADIUS}" fill="${c}" fill-opacity="0.06" stroke="${c}" stroke-width="1.5" stroke-dasharray="5 4"/>`,
+		);
+	}
+	out.push('<g fill="none" stroke-linecap="round">');
+	for (const b of scene.braces ?? []) {
+		out.push(`<path class="mapdown-summary-brace" d="${bracePath(b)}" stroke="${muted}" stroke-width="1.6" stroke-linejoin="round"/>`);
+	}
 	const widths = edgeWidths(scene.branchStyle);
 	for (const e of scene.edges) {
 		const width = e.parentId === scene.rootId ? widths.root : widths.other;
-		out.push(`<path d="${edgePath(e)}" stroke="${escapeXml(e.color)}" stroke-width="${width}"/>`);
+		out.push(`<path d="${edgePath(e)}" stroke="${e.muted ? muted : escapeXml(e.color)}" stroke-width="${width}"/>`);
 	}
 	out.push("</g>");
 	scene.nodes.forEach((node, i) => out.push(nodeSvg(node, scene, metrics, i, pixelScale)));
+	// label pills on the frames' top edges: the branch colour, text in the background colour (.mapdown-frame-label)
+	for (const { box: f, label, fontPx } of scene.frames ?? []) {
+		const l = f.label;
+		if (!l || !label) continue;
+		out.push(
+			`<rect class="mapdown-frame-label" x="${r2(l.x)}" y="${r2(l.y)}" width="${r2(l.width)}" height="${r2(l.height)}" rx="${r2(l.height / 2)}" fill="${escapeXml(f.color)}"/>`,
+			`<text x="${r2(l.x + l.width / 2)}" y="${r2(baselineY(l.y + l.height / 2, fontPx, metrics.text, pixelScale))}" text-anchor="middle" font-size="${r2(fontPx)}" font-weight="500" fill="${escapeXml(t.background)}">${xmlText(label)}</text>`,
+		);
+	}
 	out.push("</svg>");
 	return out.join("");
 }
@@ -1064,13 +1124,21 @@ export function breakChars(text: string, max: number, measure: (s: string) => nu
 export function layoutInputOf(lay: LayoutResult, childrenOf: (id: string) => readonly string[], sizes: ReadonlyMap<string, Size>): LayoutInput | null {
 	const rootId = lay.nodes.keys().next().value;
 	if (rootId === undefined) return null;
+	// summaries and frames as drawn (spec 5.15): a holding summary keeps exactly what it covered
+	const covered = new Map(lay.braces.map((b) => [b.summaryId, b.coveredIds.length]));
+	const frames = new Map(lay.frames.map((f) => [f.id, f.label]));
 	const build = (id: string): LayoutInput => {
 		const p = lay.nodes.get(id) as NodePlacement;
 		const size = sizes.get(id) ?? { width: p.width, height: p.height };
 		const children = childrenOf(id)
 			.filter((c) => lay.nodes.has(c))
 			.map(build);
-		return { id, size, collapsed: false, children };
+		const input: LayoutInput = { id, size, collapsed: false, children };
+		const count = covered.get(id);
+		if (count !== undefined) input.summary = { count };
+		const label = frames.get(id);
+		if (label !== undefined) input.frame = label ? { label: { width: label.width, height: label.height } } : {};
+		return input;
 	};
 	return build(rootId);
 }

@@ -12,7 +12,7 @@
 
 import { layout, type LayoutInput } from "../core/layout.ts";
 import { taskOf } from "../core/tasks.ts";
-import type { LayoutDirection, NodeKind, Size } from "../core/types.ts";
+import type { FrameMark, LayoutDirection, NodeKind, Size, SummaryMark } from "../core/types.ts";
 import type { BranchStyle } from "../settings.ts";
 import { mixBranch } from "./scene.ts";
 
@@ -23,6 +23,8 @@ export const CANVAS_PAD_WIDTH = 24;
 export const CANVAS_GAP_SCALE = 2.5;
 export const CANVAS_MIN_WIDTH = 120;
 export const CANVAS_MIN_HEIGHT = 50;
+/** Room between the covered cards and the group around them (spec 5.15). */
+export const COVER_PAD = 20;
 
 /** The parts of a map node the export reads (MapNode fits). */
 export interface CanvasTree {
@@ -31,6 +33,10 @@ export interface CanvasTree {
 	/** Node text as the map holds it: `<br>` already read as "\n", code with its fences. */
 	text: string;
 	children: readonly CanvasTree[];
+	/** 1.5 (spec 5.15): a summary is a card outside the covered cards, linked from a group around them. */
+	summary?: SummaryMark;
+	/** 1.5: a frame is a group around the node's cards, named by the label. */
+	frame?: FrameMark;
 }
 
 export interface CanvasOptions {
@@ -49,6 +55,18 @@ interface CanvasNode {
 	id: string;
 	type: "text";
 	text: string;
+	x: number;
+	y: number;
+	width: number;
+	height: number;
+	color?: string;
+}
+
+/** A JSON Canvas group: drawn under the cards listed after it; `label` is its name. */
+interface CanvasGroup {
+	id: string;
+	type: "group";
+	label?: string;
 	x: number;
 	y: number;
 	width: number;
@@ -128,12 +146,15 @@ export function buildCanvas(root: CanvasTree, opts: CanvasOptions): string {
 	const toInput = (node: CanvasTree, path: string, isRoot: boolean): LayoutInput => {
 		const size = canvasSize(opts.sizes.get(node.id) ?? { width: 0, height: 0 });
 		cards.set(node.id, { node, size, path, isRoot });
-		return {
+		const input: LayoutInput = {
 			id: node.id,
 			size: { width: size.width / CANVAS_GAP_SCALE, height: size.height / CANVAS_GAP_SCALE },
 			collapsed: false,
 			children: node.children.map((c, i) => toInput(c, path === "" ? String(i) : `${path}.${i}`, false)),
 		};
+		if (!isRoot && node.summary) input.summary = node.summary;
+		if (!isRoot && node.frame) input.frame = {};
+		return input;
 	};
 	const lay = layout(toInput(root, "", true), opts.direction, opts.palette);
 
@@ -164,8 +185,47 @@ export function buildCanvas(root: CanvasTree, opts: CanvasOptions): string {
 		edges.push(edge);
 	}
 
+	// frames: a group around the framed node's cards, the label as its name (outer frames first, so under)
+	const S = CANVAS_GAP_SCALE;
+	const groups: CanvasGroup[] = [];
+	for (const f of lay.frames) {
+		const card = cards.get(f.id);
+		if (!card) continue;
+		const g: CanvasGroup = { id: uniqueId(`frame:${card.path}`, taken), type: "group", x: Math.round(f.x * S), y: Math.round(f.y * S), width: Math.round(f.width * S), height: Math.round(f.height * S) };
+		const label = card.node.frame?.label;
+		if (label) g.label = label;
+		const color = hexOf(f.color);
+		if (color) g.color = color;
+		groups.push(g);
+	}
+	// summaries: an unnamed group around the covered cards (with their subtrees) and an edge from it to the summary card
+	for (const b of lay.braces) {
+		const card = cards.get(b.summaryId);
+		if (!card) continue;
+		let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+		const take = (node: CanvasTree): void => {
+			const p = lay.nodes.get(node.id);
+			const c = cards.get(node.id);
+			if (!p || !c) return;
+			x0 = Math.min(x0, p.x * S);
+			y0 = Math.min(y0, p.y * S);
+			x1 = Math.max(x1, p.x * S + c.size.width);
+			y1 = Math.max(y1, p.y * S + c.size.height);
+			node.children.forEach(take);
+		};
+		for (const id of b.coveredIds) {
+			const covered = cards.get(id);
+			if (covered) take(covered.node);
+		}
+		if (x0 === Infinity) continue;
+		const group = uniqueId(`cover:${card.path}`, taken);
+		groups.push({ id: group, type: "group", x: Math.round(x0 - COVER_PAD), y: Math.round(y0 - COVER_PAD), width: Math.round(x1 - x0 + 2 * COVER_PAD), height: Math.round(y1 - y0 + 2 * COVER_PAD) });
+		const [fromSide, toSide]: [CanvasSide, CanvasSide] = b.side === "down" ? ["bottom", "top"] : b.side === "left" ? ["left", "right"] : ["right", "left"];
+		edges.push({ id: uniqueId(`summary:${card.path}`, taken), fromNode: group, fromSide, toNode: ids.get(b.summaryId) as string, toSide, toEnd: "none" });
+	}
+
 	const tinted = opts.branchStyle === "border" || opts.branchStyle === "tint";
-	const nodes: CanvasNode[] = [];
+	const nodes: (CanvasNode | CanvasGroup)[] = [...groups];
 	for (const [id, p] of lay.nodes) {
 		const card = cards.get(id);
 		if (!card) continue;

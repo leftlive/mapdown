@@ -43,14 +43,31 @@ export const DOM = {
 	editor: 'mapdown-node-editor',
 	/** The single SVG holding every edge path. */
 	edges: 'mapdown-edges',
-	/** Toolbar; each button has `data-action` (undo, redo, zoom-in, zoom-out, fit, present, new-map, search, export). */
+	/** An edge path inside a summary's subtree (spec 5.15): drawn in the neutral colour. */
+	mutedEdge: 'is-muted-edge',
+	/**
+	 * The SVG behind the edges (spec 5.15) holding the frames and summary braces; no edge paths. Each frame is a
+	 * `frame` rect with `data-node-id` of the framed node; each brace a `summaryBrace` path plus a wider, invisible
+	 * `summaryBraceHit` path, both with `summaryAttr` holding the summary's node id (clicking the brace selects it).
+	 */
+	decor: 'mapdown-decor',
+	frame: 'mapdown-frame',
+	summaryBrace: 'mapdown-summary-brace',
+	summaryBraceHit: 'mapdown-summary-brace-hit',
+	summaryAttr: 'data-summary-id',
+	/** On a summary node that holds (spec 5.15): drawn outside its brace, with no edge from its parent. */
+	summaryNode: 'is-summary',
+	/** A frame's label pill, in the canvas above the frame's top edge; `data-node-id` of the framed node. Double-click edits the label. */
+	frameLabel: 'mapdown-frame-label',
+	/** Toolbar; each button has `data-action` (undo, redo, zoom-in, zoom-out, fit, present, new-map, search, export, markers, layout-direction). */
 	toolbar: 'mapdown-toolbar',
 	actionAttr: 'data-action',
-	/** The node menu (spec 5.2, one node selected), rendered inside the view; items carry data-action add-child, delete, focus, insert-image. */
+	/** The node menu (spec 5.2, one node selected), rendered inside the view; items carry data-action add-child, delete, focus, insert-image, markers, summary, frame. */
 	nodeMenu: 'mapdown-node-menu',
 	/**
 	 * Floating bar of the multi-selection actions (spec 5.11, desktop), inside the view; `is-shown` while
-	 * it shows. Buttons carry data-action make-tasks, bold, highlight, fold, copy, cut, delete.
+	 * it shows. Buttons carry data-action make-tasks, bold, highlight, quote, markers, summary, frame, fold, copy, cut, delete;
+	 * `summary` is disabled unless the selection is adjacent siblings (spec 5.15).
 	 */
 	multiBar: 'mapdown-multi-bar',
 	/** The same buttons as a column at the pointer: right click on a node of a multi-selection. */
@@ -72,11 +89,53 @@ export const DOM = {
 	taskProgress: 'mapdown-task-progress',
 	/** On a task node whose task is done. */
 	taskDone: 'is-task-done',
+	/**
+	 * Node markers (spec 5.14): the run of emoji drawn before a node's text (after a task checkbox), inside
+	 * the node's content; one `nodeMarker` per emoji with `markerAttr` holding it. Clicking one opens the palette.
+	 */
+	nodeMarkers: 'mapdown-node-markers',
+	nodeMarker: 'mapdown-node-marker',
+	markerAttr: 'data-marker',
+	/**
+	 * The marker palette (spec 5.14) inside the view: preset buttons carry `markerAttr` (and `is-active`,
+	 * aria-pressed="true" while every target has that marker); the clear button carries data-action clear-markers.
+	 */
+	markerPalette: 'mapdown-marker-palette',
 	/** Line decoration in the Markdown editor, shown briefly after a map selection (spec 5.6). */
 	syncLine: 'mapdown-sync-line',
+	/** Summary and frame tags in the Markdown views (spec 5.16): `noteTags` holds the pills, `noteTag` is one (a labelled frame, spec 5.16). */
+	noteTags: 'mapdown-note-tags',
+	noteTag: 'mapdown-note-tag',
+	/** A heading's comment line in the live preview that shows only tags: tight line height. */
+	noteLine: 'mapdown-note-line',
+	/** A line or reading-view section with nothing to show (a heading's comment line, a block id alone): no height. */
+	noteHidden: 'mapdown-note-hidden',
+	/** On a Markdown view of a map note: its `mindmap-plugin` and `mindmark-state` property rows are hidden (spec 5.16 item 4). */
+	propsHidden: 'mapdown-props-hidden',
+	/** The line that replaces them: icon and text, click opens the map. */
+	noteInfo: 'mapdown-note-info',
+	/**
+	 * Range lines in the Markdown views (spec 5.16 item 3). Live preview: `rangeLine` on each covered line (it
+	 * becomes `position: relative`); the `rangeDraw` element inside the line's widget draws the lines from its
+	 * inline style (core/noteRanges.ts rangeStyle). Reading view: on a covered `li`
+	 * `rangeSummary` / `rangeFrame`, on a section of a heading or paragraph range `rangeBlockSummary` /
+	 * `rangeBlockFrame`; `rangeFirst` / `rangeLast` mark where a range starts and ends (the curled ends).
+	 */
+	rangeLine: 'mapdown-range-line',
+	/** Live preview: the zero-width widget at the start of a covered line, and its child that draws the lines. */
+	rangeMarks: 'mapdown-range-marks',
+	rangeDraw: 'mapdown-range-draw',
+	rangeSummary: 'mapdown-range-summary',
+	rangeFrame: 'mapdown-range-frame',
+	rangeBlockSummary: 'mapdown-range-block-summary',
+	rangeBlockFrame: 'mapdown-range-block-frame',
+	rangeSummaryFirst: 'mapdown-range-summary-first',
+	rangeSummaryLast: 'mapdown-range-summary-last',
+	rangeFrameFirst: 'mapdown-range-frame-first',
+	rangeFrameLast: 'mapdown-range-frame-last',
 	/**
 	 * Node toolbar of the touch UI (spec 4.2); buttons carry data-action: add-child, add-sibling, edit, delete, promote,
-	 * demote, move-up, move-down, toggle-collapse, insert-image, toggle-task, undo, redo. With two or more nodes selected
+	 * demote, move-up, move-down, toggle-collapse, insert-image, toggle-task, markers, summary, frame, undo, redo. With two or more nodes selected
 	 * these hide (except undo, redo) and the multi-selection buttons (5.11, class `is-multi`, data-action as on the bar) show.
 	 */
 	mobileToolbar: 'mapdown-mobile-toolbar',
@@ -130,6 +189,9 @@ export const DOM = {
 	splitAction: 'mapdown-split-action',
 	/** Dialog for opening a plain note as a map (spec 6.2); buttons carry data-action convert, save-as-new, cancel. */
 	convertModal: 'mapdown-convert-modal',
+	/** The "Boundary label" prompt (spec 5.15) and its text input; Enter or the `mod-cta` button confirms. */
+	labelPrompt: 'mapdown-label-prompt',
+	labelPromptInput: 'mapdown-label-prompt-input',
 	/** Image picker (spec 5.8) on the modal; each item has this class and `data-action="choose-device"` or `data-path` (vault path). */
 	imagePicker: 'mapdown-image-picker',
 	imagePickerItem: 'mapdown-image-pick',
@@ -206,6 +268,10 @@ export interface RenderEvents {
 	toggleCollapse?(id: string): void;
 	/** The task checkbox of a node was clicked or tapped (never in a read-only model): toggle that task. */
 	taskToggle?(id: string): void;
+	/** A marker of a node was clicked or tapped without Mod or Shift (never in a read-only model): select it and open the palette (spec 5.14). */
+	markerClick?(id: string): void;
+	/** The label pill of a frame was double-clicked (never in a read-only model or while presenting): edit that frame's label (spec 5.15). */
+	frameLabelDoubleClick?(id: string): void;
 	/** A map card was clicked (spec 5.10, also in read-only maps): open that map. `link` is the text inside `![[…]]`. */
 	cardClick?(link: string, evt: MouseEvent): void;
 	/** Viewport changed (pan/zoom), e.g. to update toolbar state. */

@@ -17,17 +17,21 @@ import {
 	TFolder,
 	WorkspaceLeaf,
 	addIcon,
+	getLanguage,
 	editorInfoField,
+	resolveSubpath,
 	type PaneType,
 	type ViewState,
 } from 'obsidian';
-import { splitAction, splitPartners, type SplitLeaf } from './core/splitSync.ts';
+import { splitAction, splitFormOfState, splitPartners, type SplitLeaf } from './core/splitSync.ts';
 import { visibleNodes } from './core/state.ts';
 import type { TextEdit } from './core/types.ts';
 import { available, COMMANDS } from './commands.ts';
 import { isPlainNote, openPlainNoteAsMap, registerConvert } from './convert.ts';
 import { registerInsertMap } from './insertMap.ts';
 import { EmbedManager } from './embed.ts';
+import { PropertiesInfo } from './propertiesInfo.ts';
+import { markdownNotesExtension, refreshMarkdownNotes, registerReadingTags } from './markdownNotes.ts';
 import { MapCards } from './mapCards.ts';
 import { MAP_GLYPH } from './glyph.ts';
 import { nodeAtLine, nodeLine } from './controller/sourceLines.ts';
@@ -69,6 +73,8 @@ export default class MapdownPlugin extends Plugin {
 	private splitButtons = new WeakMap<MarkdownView | MapView, HTMLElement>();
 	/** Maps embedded in notes (spec 5.10). */
 	private embeds: EmbedManager | null = null;
+	/** The note-info line in the Properties panel of map notes (spec 5.16 item 4). */
+	private properties: PropertiesInfo | null = null;
 	/** Map embeds inside map nodes, drawn as cards (spec 5.10). */
 	cards!: MapCards;
 
@@ -106,11 +112,16 @@ export default class MapdownPlugin extends Plugin {
 		flush: async () => {
 			await this.lastMapView?.flush();
 		},
+		resolveHeading: (path, subpath) => {
+			const file = this.app.vault.getFileByPath(path);
+			const cache = file ? this.app.metadataCache.getFileCache(file) : null;
+			const r = cache ? resolveSubpath(cache, subpath) : null;
+			return r && r.type === 'heading' ? r.current.heading : null;
+		},
 	};
 
 	async onload(): Promise<void> {
-		// Obsidian keeps the interface language here (getLanguage() needs 1.8.7).
-		setLanguage(window.localStorage.getItem('language') ?? 'en');
+		setLanguage(getLanguage());
 		await this.loadSettings();
 		this.recovery = new RecoveryStore(this.app.vault.adapter, this.manifest.dir ?? `${this.app.vault.configDir}/plugins/${this.manifest.id}`);
 		addIcon('mapdown', ICON);
@@ -127,7 +138,10 @@ export default class MapdownPlugin extends Plugin {
 		this.registerMenus();
 		// Order matters: a typed character reaches the map (editorListener) before
 		// the cursor move of the same transaction (cursor listener).
-		this.registerEditorExtension([editorSyncExtension, this.editorListener(), this.cursorListener()]);
+		this.registerEditorExtension([editorSyncExtension, this.editorListener(), this.cursorListener(), markdownNotesExtension(this)]);
+		registerReadingTags(this);
+		this.properties = new PropertiesInfo(this);
+		this.registerEvent(this.app.metadataCache.on('changed', () => refreshMarkdownNotes(this, false)));
 
 		this.registerEvent(this.app.vault.on('modify', (file) => {
 			if (!(file instanceof TFile)) return;
@@ -135,16 +149,20 @@ export default class MapdownPlugin extends Plugin {
 		}));
 		this.registerEvent(this.app.vault.on('rename', (file, oldPath) => this.onRename(file.path, oldPath)));
 		this.registerEvent(this.app.workspace.on('active-leaf-change', (leaf) => {
-			const view = leaf?.view;
-			if (view instanceof MapView) {
-				this.lastMapView = view;
-				view.focusMap();
-			}
-			this.updateHeaderButtons();
+			this.onActiveLeaf(leaf);
 		}));
 		this.registerEvent(this.app.workspace.on('layout-change', () => this.updateHeaderButtons()));
 		this.registerEvent(this.app.workspace.on('file-open', () => this.updateHeaderButtons()));
 		this.app.workspace.onLayoutReady(() => this.updateHeaderButtons());
+	}
+
+	private onActiveLeaf(leaf: WorkspaceLeaf | null): void {
+		const view = leaf?.view;
+		if (view instanceof MapView) {
+			this.lastMapView = view;
+			view.focusMap();
+		}
+		this.updateHeaderButtons();
 	}
 
 	onunload(): void {
@@ -179,10 +197,13 @@ export default class MapdownPlugin extends Plugin {
 		await this.saveData(out);
 		for (const v of this.mapViews()) v.applySettings();
 		this.embeds?.applySettings();
+		refreshMarkdownNotes(this);
+		this.properties?.sync();
 	}
 
 	// ------------------------------------------------------------ views
 
+	/** The loaded map views. Deferred map tabs are skipped: they read the file and settings when they load. */
 	mapViews(): MapView[] {
 		return this.app.workspace.getLeavesOfType(VIEW_TYPE).map((l) => l.view).filter((v): v is MapView => v instanceof MapView);
 	}
@@ -295,7 +316,7 @@ export default class MapdownPlugin extends Plugin {
 		const file = await this.app.vault.create(path, NEW_MAP_TEXT);
 		const leaf = this.app.workspace.getLeaf('tab');
 		await leaf.setViewState({ type: VIEW_TYPE, state: { file: file.path }, active: true });
-		this.app.workspace.setActiveLeaf(leaf, { focus: true });
+		await this.showLeaf(leaf);
 		const view = leaf.view;
 		if (view instanceof MapView) {
 			this.lastMapView = view;
@@ -308,6 +329,7 @@ export default class MapdownPlugin extends Plugin {
 	leafFor(pane: PaneType | boolean, el: HTMLElement): WorkspaceLeaf {
 		const ws = this.app.workspace;
 		const mine: WorkspaceLeaf[] = [];
+		// a deferred tab has no content yet, so it cannot hold `el`
 		if (pane === false) ws.iterateAllLeaves((l) => {
 			if (l.view.containerEl.contains(el)) mine.push(l);
 		});
@@ -318,8 +340,15 @@ export default class MapdownPlugin extends Plugin {
 	async openMapAt(leaf: WorkspaceLeaf, file: TFile, line: number | null): Promise<void> {
 		this.setFileMode(leaf, file.path, 'mindmap');
 		await leaf.setViewState({ type: VIEW_TYPE, state: { file: file.path }, active: true });
-		this.app.workspace.setActiveLeaf(leaf, { focus: true });
+		await this.showLeaf(leaf);
 		if (line !== null && leaf.view instanceof MapView) leaf.view.revealLine(line);
+	}
+
+	/** Bring a tab just opened forward (its window and sidebar too; loads it if deferred) and focus it. */
+	async showLeaf(leaf: WorkspaceLeaf): Promise<void> {
+		const ws = this.app.workspace;
+		await ws.revealLeaf(leaf);
+		ws.setActiveLeaf(leaf, { focus: true });
 	}
 
 	openLink(href: string, sourcePath: string, evt: MouseEvent): void {
@@ -340,6 +369,7 @@ export default class MapdownPlugin extends Plugin {
 			id: 'Toggle to markdown or mindmap',
 			name: t('Toggle to markdown or mindmap'),
 			checkCallback: (checking) => {
+				// the most recent tab is the one in use, so it is loaded, not deferred
 				const leaf = this.app.workspace.getMostRecentLeaf();
 				const view = leaf?.view;
 				if (!leaf || !view) return false;
@@ -449,8 +479,14 @@ export default class MapdownPlugin extends Plugin {
 		this.app.workspace.iterateAllLeaves((l) => {
 			// any Markdown view of the note counts, map note or not (a plain Markdown tab of it)
 			const view = l.view;
-			if (view instanceof MapView) all.push({ leaf: l, kind: 'map', path: view.file?.path ?? null, root: l.getRoot(), parent: l.parent });
-			else if (view instanceof MarkdownView) all.push({ leaf: l, kind: 'markdown', path: view.file?.path ?? null, root: l.getRoot(), parent: l.parent });
+			const at = { leaf: l, root: l.getRoot(), parent: l.parent };
+			if (view instanceof MapView) all.push({ ...at, kind: 'map', path: view.file?.path ?? null });
+			else if (view instanceof MarkdownView) all.push({ ...at, kind: 'markdown', path: view.file?.path ?? null });
+			else if (l.isDeferred) {
+				// not shown since the restart: read its saved state; closing it needs no load
+				const form = splitFormOfState(l.getViewState(), VIEW_TYPE);
+				if (form) all.push({ ...at, ...form });
+			}
 		});
 		return splitPartners(self, all);
 	}
@@ -511,6 +547,7 @@ export default class MapdownPlugin extends Plugin {
 	private updateHeaderButtons(): void {
 		for (const leaf of this.app.workspace.getLeavesOfType('markdown')) {
 			const view = leaf.view;
+			// a deferred tab has no header yet; layout-change after it loads adds the buttons
 			if (!(view instanceof MarkdownView)) continue;
 			let button = this.headerButtons.get(view);
 			if (!button) {

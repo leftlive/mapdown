@@ -3,7 +3,9 @@
 // text formatting and the clipboard formats. Commands (src/commands.ts) turn
 // these into session steps.
 
-import { writeOutline } from '../core/outline.ts';
+import { splitMarkers } from '../core/markers.ts';
+import { isQuoteLines, writeOutline } from '../core/outline.ts';
+import { notesSuffix } from '../core/summary.ts';
 import {
 	deleteNodes,
 	findNodeAt,
@@ -14,7 +16,7 @@ import {
 	type NodeInput,
 } from '../core/ops.ts';
 import { visibleNodes, type ViewState } from '../core/state.ts';
-import type { LayoutDirection, MapNode, ParsedDoc } from '../core/types.ts';
+import type { LayoutDirection, MapNode, NodeKind, ParsedDoc } from '../core/types.ts';
 import { indexNodes, type StepFn } from './session.ts';
 import { mapPos } from './textEdits.ts';
 
@@ -251,6 +253,34 @@ export function toggleWrap(text: string, marker: string): string {
 	return marker + text + marker;
 }
 
+/** A callout's first line (`> [!type]`): wrapping its text would break it, so callouts are left alone. */
+const CALLOUT_HEAD = /^>[ \t]*\[!/;
+const QUOTE_PREFIX = /^(?:> ?)+/;
+
+/**
+ * Whole-node bold, italic, highlight or strike (spec 2.3): wraps only the real
+ * text. A task's `[ ] `, the run of markers (5.14) and each quote line's leading
+ * `>` and space stay outside; the lines of a quote are wrapped one by one (a
+ * format mark cannot cross lines). Already wrapped (past the prefixes) unwraps.
+ * A callout, or a node with no text after its prefixes, comes back unchanged.
+ */
+export function toggleWrapNode(text: string, kind: NodeKind, marker: string): string {
+	const split = splitMarkers(text, kind);
+	const head = text.slice(0, split.restFrom);
+	const rest = split.rest;
+	if (rest.trim() === '' || CALLOUT_HEAD.test(rest)) return text;
+	if (!isQuoteLines(rest)) return head + toggleWrap(rest, marker);
+	const lines = rest.split('\n').map((l) => {
+		const prefix = QUOTE_PREFIX.exec(l)?.[0] ?? '';
+		return { prefix, body: l.slice(prefix.length) };
+	});
+	const wrapped = (b: string): boolean => b.length >= marker.length * 2 && b.startsWith(marker) && b.endsWith(marker);
+	const filled = lines.filter((l) => l.body.trim() !== '');
+	if (filled.length === 0) return text;
+	const unwrap = filled.every((l) => wrapped(l.body));
+	return head + lines.map((l) => (l.body.trim() === '' ? l.prefix + l.body : l.prefix + (unwrap ? toggleWrap(l.body, marker) : wrapped(l.body) ? l.body : toggleWrap(l.body, marker)))).join('\n');
+}
+
 /** "Remove line breaks": every line break becomes a space. */
 export function removeLineBreaks(text: string): string {
 	return text.replace(/\s*\n\s*/g, ' ');
@@ -307,7 +337,8 @@ export function toClipboardJson(nodes: readonly MapNode[], collapsed: ReadonlySe
 	let n = 0;
 	const walk = (node: MapNode, pid: string | null): void => {
 		const id = `n${++n}`;
-		items.push({ id, text: node.text, pid, expanded: !collapsed.has(node.id), note: '' });
+		// Summary and frame comments travel in the text, as they are part of the line (spec 5.15).
+		items.push({ id, text: node.text + notesSuffix(node), pid, expanded: !collapsed.has(node.id), note: '' });
 		node.children.forEach((c) => walk(c, id));
 	};
 	nodes.forEach((node) => walk(node, null));
@@ -354,7 +385,7 @@ export function fromClipboardJson(text: string): ClipNode[] | null {
 /** Markdown outline of the nodes, as list items (format contract 6), without block ids. */
 export function toClipboardOutline(nodes: readonly MapNode[]): string {
 	return nodes
-		.map((n) => writeOutline(n, 0, { children: (x) => x.children, text: (x) => x.text, blockId: () => '' }, '\n'))
+		.map((n) => writeOutline(n, 0, { children: (x) => x.children, text: (x) => x.text, blockId: () => '', notes: (x) => notesSuffix(x) }, '\n'))
 		.join('\n');
 }
 
